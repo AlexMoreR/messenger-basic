@@ -1,4 +1,4 @@
-// Messenger Chatbot — SOLO REGLAS — Contexto por hilo + anti-duplicados
+// Messenger Chatbot — SOLO REGLAS — Contexto por hilo + anti-duplicados (FIX carreras)
 (() => {
   "use strict";
 
@@ -67,6 +67,9 @@
   let msgObserver = null;
   let rules = null;
 
+  // Mutex por hilo para evitar condiciones de carrera
+  const inFlight = new Set();
+
   /* ====================== HELPERS DOM ====================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
   const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
@@ -75,7 +78,6 @@
   const getCurrentThreadId = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
-    // fallback: return "unknown" no es deseable; preferimos null para no mezclar estados.
   };
 
   const findComposer = () => {
@@ -87,7 +89,6 @@
     ].join(",");
     const boxes = QA(sel).filter(isVisible);
     if (!boxes.length) return null;
-    // suele estar el de abajo en la vista
     return boxes.reduce((a, b) => (a.getBoundingClientRect().top > b.getBoundingClientRect().top ? a : b));
   };
 
@@ -216,50 +217,65 @@
     return true;
   };
 
-  /* ====================== MOTOR REGLAS (único) ====================== */
+  /* ====================== MOTOR REGLAS (con mutex) ====================== */
   const maybeReplyByRules = async (tid) => {
-    const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
-    if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) return false;
+    // Mutex por hilo: evita carreras entre tick/observer/callbacks
+    if (inFlight.has(tid)) return false;
+    inFlight.add(tid);
 
-    const text = getLastIncomingText();
-    if (!text) return false;
+    try {
+      const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
+      if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) return false;
 
-    const inHash = djb2(text);
-    const lastIn = await S.get(lastIncomingKey(tid), "");
-    if (String(lastIn) === String(inHash)) return false; // ya procesado
+      const text = getLastIncomingText();
+      if (!text) return false;
 
-    const compiled = getCompiledRules();
-    let reply = null;
-    for (const { re, reply: rep } of compiled) {
-      if (re.test(text)) { reply = rep; break; }
-    }
-    if (!reply) reply = (CFG.DEFAULT_FALLBACK || "").trim();
-    if (!reply) { // sin match ni fallback: solo recordamos el hash
-      await S.set(lastIncomingKey(tid), inHash);
+      const inHash = djb2(text);
+      const lastIn = await S.get(lastIncomingKey(tid), "");
+      if (String(lastIn) === String(inHash)) return false; // ya procesado
+
+      const compiled = getCompiledRules();
+      let reply = null;
+      for (const { re, reply: rep } of compiled) {
+        if (re.test(text)) { reply = rep; break; }
+      }
+      if (!reply) reply = (CFG.DEFAULT_FALLBACK || "").trim();
+      if (!reply) {
+        await S.set(lastIncomingKey(tid), inHash);
+        return false;
+      }
+
+      // Evita eco si lo último visible ya es exactamente el mismo reply
+      if (getLastIncomingText() === reply) {
+        await S.set(lastIncomingKey(tid), inHash);
+        return false;
+      }
+
+      // Anti repetir exactamente la misma respuesta consecutiva
+      const lastSent = await S.get(lastSentHashKey(tid), "");
+      const thisHash = djb2(reply);
+      if (String(lastSent) === String(thisHash)) {
+        await S.set(lastIncomingKey(tid), inHash);
+        return false;
+      }
+
+      // Contexto por hilo
+      const ctx = (await S.get(threadContextKey(tid), "") || "").trim();
+      const toSend = ctx ? `${ctx}\n\n${reply}` : reply;
+
+      const ok = await sendText(toSend);
+      if (ok) {
+        const nowTs = now();
+        await S.set(lastReplyAtKey(tid), nowTs);
+        await S.set(lastIncomingKey(tid), inHash);
+        await S.set(lastSentHashKey(tid), thisHash);
+        log("[rules] respuesta enviada");
+        return true;
+      }
       return false;
+    } finally {
+      inFlight.delete(tid);
     }
-
-    // anti repetir exactamente la misma respuesta consecutiva
-    const lastSent = await S.get(lastSentHashKey(tid), "");
-    const thisHash = djb2(reply);
-    if (String(lastSent) === String(thisHash)) {
-      await S.set(lastIncomingKey(tid), inHash);
-      return false;
-    }
-
-    // Prepend opcional del contexto del hilo si existe
-    const ctx = (await S.get(threadContextKey(tid), "") || "").trim();
-    const toSend = ctx ? `${ctx}\n\n${reply}` : reply;
-
-    const ok = await sendText(toSend);
-    if (ok) {
-      await S.set(lastReplyAtKey(tid), now());
-      await S.set(lastIncomingKey(tid), inHash);
-      await S.set(lastSentHashKey(tid), thisHash);
-      log("[rules] respuesta enviada");
-      return true;
-    }
-    return false;
   };
 
   /* ====================== UI: Topbar + Modales ====================== */
@@ -462,19 +478,26 @@
     }
   };
 
-  /* ====================== OBSERVADORES ====================== */
+  /* ====================== OBSERVADORES (debounce) ====================== */
   const bootMsgObserver = () => {
     if (msgObserver) return;
-    msgObserver = new MutationObserver(() => {
+
+    let moQueued = false;
+    const fire = () => {
       if (!enabled) return;
-      processCurrentChat(); // de-duplicación evita dobles envíos
+      processCurrentChat();
+    };
+
+    msgObserver = new MutationObserver(() => {
+      if (moQueued) return;
+      moQueued = true;
+      setTimeout(() => { moQueued = false; fire(); }, 120); // debounce corto
     });
     msgObserver.observe(document.body, { childList: true, subtree: true });
   };
 
   /* ====================== INIT ====================== */
   const init = async () => {
-    // carga reglas
     try {
       const r = await S.get(k.rules, null);
       rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
@@ -505,6 +528,9 @@
       rules = arr;
       await S.set(k.rules, JSON.stringify(arr, null, 2));
     },
-    async context(tid, val) { if (typeof val === "undefined") return S.get(k.byThread(tid, "context_text"), ""); return S.set(k.byThread(tid, "context_text"), String(val||"")); }
+    async context(tid, val) {
+      if (typeof val === "undefined") return S.get(k.byThread(tid, "context_text"), "");
+      return S.set(k.byThread(tid, "context_text"), String(val||""));
+    }
   };
 })();

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Messenger Quick Replies (Basic)",
+  "name": "NETMAGI (Basic)",
   "version": "1.0.0",
   "description": "Botón flotante con respuestas rápidas para Messenger (pega texto, no envía automático).",
   "permissions": ["scripting"],
@@ -18,5 +18,5 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "Messenger Quick Replies" }
+  "action": { "default_title": "NETMAGI Replies" }
 }
