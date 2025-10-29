@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Messenger Quick Replies (Basic)",
+  "version": "1.0.0",
+  "description": "Botón flotante con respuestas rápidas para Messenger (pega texto, no envía automático).",
+  "permissions": ["scripting"],
+  "host_permissions": [
+    "https://www.messenger.com/*",
+    "https://www.facebook.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.messenger.com/*",
+        "https://www.facebook.com/messages/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "Messenger Quick Replies" }
+}
