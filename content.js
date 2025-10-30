@@ -1,4 +1,5 @@
-// Messenger Chatbot — SOLO REGLAS — Responder SOLO cuando llega mensaje nuevo (FIX definitivo)
+// Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes entrantes reales
+// Fix: NO responde al cambiar/abrir chats, sólo cuando llega un mensaje nuevo.
 // Fecha: 2025-10-29
 
 (() => {
@@ -7,11 +8,12 @@
   /* ====================== CONFIG ====================== */
   const CFG = {
     AUTO_START: true,
-    SCAN_EVERY_MS: 1200,          // loop de escaneo ligero (no dispara envíos)
+    SCAN_EVERY_MS: 1200,          // loop de escaneo (no dispara envíos)
     CLICK_COOLDOWN_MS: 8000,      // anti-spam al abrir chats no leídos
     REPLY_COOLDOWN_MS: 12000,     // intervalo mínimo entre respuestas por hilo
-    OPEN_UNREAD: true,            // abrir chats no leídos (no enviará si no hay mensaje nuevo)
-    DEFAULT_FALLBACK: "",         // "" = no enviar nada si no hay match de regla
+    OPEN_UNREAD: true,            // abrir no leídos (no enviará solos)
+    THREAD_LOAD_SILENCE_MS: 1800, // ventana de silencio tras cambiar de chat
+    DEFAULT_FALLBACK: "",         // "" = no enviar nada si no hay match
     DEBUG: true
   };
 
@@ -71,16 +73,19 @@
   // Mutex por hilo
   const inFlight = new Set();
 
-  // Bandera: solo responder si LLEGÓ un mensaje entrante real
-  // (se activa desde MutationObserver y se consume/limpia al procesar)
+  // Bandera: sólo responder si llega NUEVO entrante (marcada por observer)
   const newIncomingFlag = new Map(); // tid -> boolean
+
+  // Control de cambios de chat (URL / selección)
+  let currentTid = null;
+  let threadSilenceUntil = 0; // timestamp hasta el cual ignoramos mutaciones
 
   /* ====================== HELPERS ====================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
   const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
   const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
 
-  const getCurrentThreadId = () => {
+  const getCurrentThreadIdFromURL = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
   };
@@ -192,20 +197,19 @@
   const getCompiledRules = () => (Array.isArray(rules) ? rules : []).map(compile).filter(Boolean);
 
   /* ====================== KEYS POR HILO ====================== */
-  const lastReplyAtKey     = (tid) => k.byThread(tid, "last_reply_at");
-  const lastSentHashKey    = (tid) => k.byThread(tid, "last_sent_hash");
-  const lastIncomingHashKey= (tid) => k.byThread(tid, "last_in_hash");
-  const threadContextKey   = (tid) => k.byThread(tid, "context_text");
+  const lastReplyAtKey      = (tid) => k.byThread(tid, "last_reply_at");
+  const lastSentHashKey     = (tid) => k.byThread(tid, "last_sent_hash");
+  const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");      // último entrante atendido
+  const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");      // snapshot al abrir hilo
+  const threadContextKey    = (tid) => k.byThread(tid, "context_text");
 
-  /* ====================== DETECCIÓN DE ENTRANTE ====================== */
-  // Devuelve texto del ÚLTIMO mensaje ENTRANTE (del cliente), normalizado
+  /* ====================== LECTURA ÚLTIMO ENTRANTE ====================== */
   const getLastIncomingText = () => {
     const bubbles = QA('[data-testid*="message"], [data-testid*="message-container"], [role="row"]').filter(isVisible);
     for (let i=bubbles.length-1;i>=0;i--) {
       const b = bubbles[i];
       const aria = (b.getAttribute("aria-label") || "").toLowerCase();
-      // descarta burbujas de "tú/you" (las nuestras)
-      if (/\b(you|tú)\b/.test(aria)) continue;
+      if (/\b(you|tú)\b/.test(aria)) continue; // ignorar propios
       const nodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', b);
       const text = nodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n").trim();
       if (text) return text.replace(/\s+/g, " ");
@@ -213,22 +217,26 @@
     return null;
   };
 
-  // Determina si un nodo agregado es una BURBUJA ENTRANTE (del cliente)
+  const getSnapshotHash = () => {
+    // hash de "último texto entrante + cantidad de burbujas visibles"
+    const bubbles = QA('[data-testid*="message"], [data-testid*="message-container"], [role="row"]').filter(isVisible);
+    const count = bubbles.length;
+    const txt = getLastIncomingText() || "";
+    return djb2(`${txt}#${count}`);
+  };
+
+  // ¿El nodo agregado parece una burbuja ENTRANTE (del cliente) con texto?
   const isIncomingBubbleNode = (node) => {
     if (!(node instanceof HTMLElement)) return false;
-    // Buscar un contenedor de mensaje dentro del nodo
     const bubble = node.matches?.('[data-testid*="message"], [data-testid*="message-container"], [role="row"]')
       ? node
       : node.querySelector?.('[data-testid*="message"], [data-testid*="message-container"], [role="row"]');
     if (!bubble || !isVisible(bubble)) return false;
     const aria = (bubble.getAttribute("aria-label") || "").toLowerCase();
-    // si contiene "you" o "tú" => es propio; lo ignoramos
-    if (/\b(you|tú)\b/.test(aria)) return false;
-
-    // Verifica que tenga texto
-    const textNodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', bubble);
-    const t = textNodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n").trim();
-    return !!t;
+    if (/\b(you|tú)\b/.test(aria)) return false; // propio
+    const nodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', bubble);
+    const text = nodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n").trim();
+    return !!text;
   };
 
   /* ====================== ENVÍO ====================== */
@@ -241,19 +249,18 @@
     return true;
   };
 
-  /* ====================== MOTOR: SOLO si hay NUEVO entrante ====================== */
+  /* ====================== MOTOR: SOLO con nuevo entrante ====================== */
   const maybeReplyByRules = async (tid) => {
     if (!tid) return false;
 
-    // Solo procesar si el observer marcó entradas nuevas para ESTE hilo
+    // SOLO si el observer detectó NUEVO entrante y ya pasó la ventana de silencio
     if (!newIncomingFlag.get(tid)) return false;
+    if (now() < threadSilenceUntil) return false;
 
-    // mutex por hilo
     if (inFlight.has(tid)) return false;
     inFlight.add(tid);
 
     try {
-      // Cooldown por hilo
       const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
       if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) { newIncomingFlag.set(tid, false); return false; }
 
@@ -262,7 +269,7 @@
 
       const inHash = djb2(text);
       const lastIn = await S.get(lastIncomingHashKey(tid), "");
-      if (String(lastIn) === String(inHash)) { // ya procesado este mismo entrante
+      if (String(lastIn) === String(inHash)) { // ya atendido
         newIncomingFlag.set(tid, false);
         return false;
       }
@@ -275,8 +282,7 @@
       }
 
       if (!reply) {
-        // sin match: marcar como procesado para no reintentar hasta que llegue otro mensaje
-        await S.set(lastIncomingHashKey(tid), inHash);
+        await S.set(lastIncomingHashKey(tid), inHash); // marcar procesado sin respuesta
         newIncomingFlag.set(tid, false);
         return false;
       }
@@ -298,20 +304,19 @@
       if (ok) {
         const ts = now();
         await S.set(lastReplyAtKey(tid), ts);
-        await S.set(lastIncomingHashKey(tid), inHash); // marcamos este entrante como ya atendido
+        await S.set(lastIncomingHashKey(tid), inHash);
         await S.set(lastSentHashKey(tid), thisHash);
         log("[rules] respuesta enviada");
       }
 
-      // SIEMPRE limpiar la bandera: solo se activa cuando entre NUEVO mensaje real
-      newIncomingFlag.set(tid, false);
+      newIncomingFlag.set(tid, false); // consumir bandera SIEMPRE
       return !!ok;
     } finally {
       inFlight.delete(tid);
     }
   };
 
-  /* ====================== UI (compacta) ====================== */
+  /* ====================== UI mínima ====================== */
   const injectTopBar = async () => {
     if (Q("#vz-topbar")) return;
 
@@ -458,7 +463,7 @@
   };
 
   const openContextModal = async () => {
-    const tid = getCurrentThreadId() || "unknown";
+    const tid = currentTid || "unknown";
     openModal({
       title: `Contexto del chat (hilo: ${tid})`,
       initialValue: await S.get(k.byThread(tid, "context_text"), "") || "",
@@ -471,38 +476,60 @@
     });
   };
 
+  /* ====================== CAMBIO DE CHAT (barrera + baseline) ====================== */
+  const onThreadChanged = async (newTid) => {
+    currentTid = newTid || "unknown";
+    newIncomingFlag.set(currentTid, false);           // limpiar bandera
+    threadSilenceUntil = now() + CFG.THREAD_LOAD_SILENCE_MS; // silenciar mutaciones del load
+    // fijar baseline del hilo: hash actual del historial visible
+    const base = getSnapshotHash();
+    await S.set(baselineHashKey(currentTid), base);
+    await S.set(lastIncomingHashKey(currentTid), base); // tratamos el estado visible como "ya atendido"
+    log("[thread] cambiado a", currentTid, " baseline:", base);
+  };
+
+  const watchURL = () => {
+    let lastPath = location.pathname;
+    const check = () => {
+      if (location.pathname !== lastPath) {
+        lastPath = location.pathname;
+        const tid = getCurrentThreadIdFromURL() || "unknown";
+        onThreadChanged(tid);
+      }
+    };
+    setInterval(check, 300);
+  };
+
   /* ====================== LOOP (no dispara respuestas) ====================== */
   const processCurrentChat = async () => {
-    const tid = getCurrentThreadId() || "unknown";
+    const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
     await maybeReplyByRules(tid);
   };
 
   const tick = async () => {
     if (!enabled) return;
 
-    // No responde por timer; solo procesa si el observer marcó mensaje nuevo
+    // Procesa solo si el observer detectó nuevo entrante y pasó la barrera
     await processCurrentChat();
 
-    // Abrir no leídos si corresponde (no envía nada por sí mismo)
+    // Abrir no leídos si corresponde (NO envía nada por sí mismo)
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
-        const current = getCurrentThreadId();
-        const candidate = links.find(a => getThreadIdFromHref(a.getAttribute("href")) !== current) || links[0];
+        const candidate = links.find(a => getThreadIdFromHref(a.getAttribute("href")) !== currentTid) || links[0];
         if (candidate) {
           lastClickAt = now();
           realClick(candidate);
+          // Tras abrir, se disparará onThreadChanged por watchURL; no respondemos aún (barrera activa).
           setTimeout(() => {
             clickUnreadDividerIfAny();
-            // Solo se responderá si el observer marca nuevo entrante
-            processCurrentChat();
           }, 200);
         }
       }
     }
   };
 
-  /* ====================== OBSERVER: activa bandera SOLO con entrantes ====================== */
+  /* ====================== OBSERVER: marca SOLO nuevo entrante real ====================== */
   const bootMsgObserver = () => {
     if (msgObserver) return;
 
@@ -510,43 +537,46 @@
 
     const markIfIncoming = (node) => {
       try {
+        // Dentro de ventana de silencio: ignorar (historial cargando)
+        if (now() < threadSilenceUntil) return false;
+
         if (isIncomingBubbleNode(node)) {
-          const tid = getCurrentThreadId() || "unknown";
-          newIncomingFlag.set(tid, true);
-          return true;
-        }
-        // también revisar hijos
-        const els = node.querySelectorAll?.('*');
-        if (!els) return false;
-        for (const el of els) {
-          if (isIncomingBubbleNode(el)) {
-            const tid = getCurrentThreadId() || "unknown";
+          // Comprobar que el snapshot actual sea distinto al baseline/lastIncoming
+          const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
+          const currentHash = getSnapshotHash();
+          // Si coincide con lo ya registrado, no es nuevo
+          return S.get(lastIncomingHashKey(tid), "").then(lastIn => {
+            if (String(lastIn) === String(currentHash)) return false;
             newIncomingFlag.set(tid, true);
             return true;
-          }
+          });
         }
       } catch {}
       return false;
     };
 
-    msgObserver = new MutationObserver((mutList) => {
+    msgObserver = new MutationObserver(async (mutList) => {
+      // Evitar congestión
+      if (moQueued) return;
+
+      // Evaluar si hay al menos un entrante real fuera de la barrera
       let incomingDetected = false;
       for (const m of mutList) {
         if (m.type === "childList" && m.addedNodes?.length) {
           for (const n of m.addedNodes) {
-            if (markIfIncoming(n)) { incomingDetected = true; break; }
+            const flagged = await markIfIncoming(n);
+            if (flagged) { incomingDetected = true; break; }
           }
           if (incomingDetected) break;
         }
       }
       if (!incomingDetected) return;
 
-      if (moQueued) return;
       moQueued = true;
       setTimeout(() => {
         moQueued = false;
         if (!enabled) return;
-        processCurrentChat(); // ahora sí procesará y luego limpiará la bandera
+        processCurrentChat(); // procesará y consumirá bandera
       }, 100);
     });
 
@@ -562,10 +592,13 @@
 
     await injectTopBar();
     bootMsgObserver();
+    watchURL();
+
+    // fijar hilo inicial y baseline
+    await onThreadChanged(getCurrentThreadIdFromURL());
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo (solo reglas, responde SOLO con entrantes nuevos). Hilo:", getCurrentThreadId());
-    tick();
+    log("Bot listo (responde SOLO a entrantes; ignora cambio de chat). Hilo:", currentTid);
   };
 
   if (document.readyState === "loading") {
