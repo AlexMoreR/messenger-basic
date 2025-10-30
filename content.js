@@ -1,5 +1,6 @@
 // Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes entrantes reales
-// Fix: NO responde al cambiar/abrir chats, sólo cuando llega un mensaje nuevo.
+// Fix: NO responde al cambiar/abrir chats, SOLO cuando llega mensaje nuevo.
+// Cambio solicitado: **Eliminada** la opción "Contexto (chat)" y TODO su código asociado.
 // Fecha: 2025-10-29
 
 (() => {
@@ -201,7 +202,7 @@
   const lastSentHashKey     = (tid) => k.byThread(tid, "last_sent_hash");
   const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");      // último entrante atendido
   const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");      // snapshot al abrir hilo
-  const threadContextKey    = (tid) => k.byThread(tid, "context_text");
+  // (eliminado threadContextKey y todo uso de contexto)
 
   /* ====================== LECTURA ÚLTIMO ENTRANTE ====================== */
   const getLastIncomingText = () => {
@@ -296,9 +297,8 @@
         return false;
       }
 
-      // Contexto opcional
-      const ctx = (await S.get(threadContextKey(tid), "") || "").trim();
-      const toSend = ctx ? `${ctx}\n\n${reply}` : reply;
+      // (eliminado: no se antepone ningún "contexto")
+      const toSend = reply;
 
       const ok = await sendText(toSend);
       if (ok) {
@@ -316,7 +316,7 @@
     }
   };
 
-  /* ====================== UI mínima ====================== */
+  /* ====================== UI mínima (sin botón de Contexto) ====================== */
   const injectTopBar = async () => {
     if (Q("#vz-topbar")) return;
 
@@ -364,10 +364,7 @@
     const btnRules = mkBtn("Editar reglas", "#7c3aed");
     btnRules.onclick = () => openRulesModal();
 
-    const btnCtx = mkBtn("Contexto (chat)", "#3b82f6");
-    btnCtx.onclick = () => openContextModal();
-
-    bar.append(status, btnToggle, btnRules, btnCtx);
+    bar.append(status, btnToggle, btnRules);
     wrap.append(bar);
     document.documentElement.append(wrap);
   };
@@ -458,20 +455,6 @@
         rules = parsed;
         await S.set(k.rules, JSON.stringify(parsed, null, 2));
         log("Reglas guardadas");
-      }
-    });
-  };
-
-  const openContextModal = async () => {
-    const tid = currentTid || "unknown";
-    openModal({
-      title: `Contexto del chat (hilo: ${tid})`,
-      initialValue: await S.get(k.byThread(tid, "context_text"), "") || "",
-      placeholder: "Escribe aquí notas o contexto para este hilo. Se antepondrá a las respuestas.",
-      mono: false,
-      onSave: async (val) => {
-        await S.set(k.byThread(tid, "context_text"), String(val || ""));
-        log("Contexto guardado para", tid);
       }
     });
   };
@@ -598,7 +581,7 @@
     await onThreadChanged(getCurrentThreadIdFromURL());
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo (responde SOLO a entrantes; ignora cambio de chat). Hilo:", currentTid);
+    log("Bot listo (sin contexto; responde SOLO a entrantes; ignora cambio de chat). Hilo:", currentTid);
   };
 
   if (document.readyState === "loading") {
@@ -617,11 +600,7 @@
       if (!Array.isArray(arr)) throw new Error("setRules espera array");
       rules = arr;
       await S.set(k.rules, JSON.stringify(arr, null, 2));
-    },
-    async context(tid, val) {
-      const key = k.byThread(tid, "context_text");
-      if (typeof val === "undefined") return S.get(key, "");
-      return S.set(key, String(val || ""));
     }
+    // (eliminado: API de contexto)
   };
 })();
