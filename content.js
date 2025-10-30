@@ -1,9 +1,8 @@
 // Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes ENTRANTES reales
-// FIX: detección robusta del ÚLTIMO mensaje entrante (no depende solo de aria-label).
-// - No responde al abrir/cambiar de chat.
-// - Responde apenas llega un mensaje NUEVO del cliente.
-// - Evita duplicados por mutaciones del DOM.
-// Fecha: 2025-10-29
+// FIX 2025-10-29:
+// - Dirección 'in/out' más robusta (detecta "Has enviado / You sent" como OUT).
+// - Cooldown por hilo tras enviar para ignorar mutaciones del DOM.
+// - Mantiene anti-duplicados por hash de entrante y de respuesta.
 
 (() => {
   "use strict";
@@ -12,19 +11,20 @@
   const CFG = {
     AUTO_START: true,
     SCAN_EVERY_MS: 1200,           // loop ligero (no dispara envíos)
-    CLICK_COOLDOWN_MS: 8000,       // anti-spam al abrir chats no leídos
+    CLICK_COOLDOWN_MS: 8000,       // anti-spam al abrir no leídos
     REPLY_COOLDOWN_MS: 12000,      // mínimo entre respuestas por hilo
     OPEN_UNREAD: true,             // abrir no leídos (no envía por sí mismo)
     THREAD_LOAD_SILENCE_MS: 1500,  // silencio tras cambiar de chat
-    DEFAULT_FALLBACK: "",          // "" = no responder si no hay match
+    SEND_COOLDOWN_MS: 1200,        // silencio tras enviar (mutaciones post-envío)
+    DEFAULT_FALLBACK: "",
     DEBUG: true
   };
 
-  // Reglas por defecto (ajústalas a tu caso)
+  // Reglas por defecto
   const DEFAULT_RULES = [
     { pattern: "\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", flags: "i", reply: "¡Mucho gusto! 😊 ¿En qué te ayudo?" },
     { pattern: "precio|valor|cu[aá]nto cuesta|costo", flags: "i", reply: "Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" },
-    { pattern: "horario|hora|atienden", flags: "i", reply: "Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" },
+    { pattern: "(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", flags: "i", reply: "Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" },
     { pattern: "env[ií]o|entrega|domicilio", flags: "i", reply: "¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" },
     { pattern: "^hola\\b|buen[oa]s|saludos", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." }
   ];
@@ -78,9 +78,10 @@
   let threadSilenceUntil = 0;
 
   // Flags/dedup
-  const inFlight = new Set();            // mutex por hilo
-  const newIncomingFlag = new Map();     // tid -> boolean (solo procesa si true)
-  const lastBubbleHashMem = new Map();   // tid -> hash (dedup local de mutaciones)
+  const inFlight = new Set();                 // mutex por hilo
+  const newIncomingFlag = new Map();          // tid -> boolean (solo procesa si true)
+  const lastBubbleHashMem = new Map();        // tid -> hash local (mutaciones)
+  const sendCooldownUntil = new Map();        // tid -> ts (ignorar mutaciones post-envío)
 
   /* ====================== HELPERS DOM ====================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
@@ -90,13 +91,28 @@
   const getCurrentThreadIdFromURL = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
-    // si es null, no hay hilo abierto
   };
 
   const djb2 = (s) => {
+    s = String(s);
     let h = 5381;
     for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i);
     return String(h >>> 0);
+  };
+
+  const normalize = (s) => String(s || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim();
+
+  const OUT_HINTS = [
+    "you sent", "has enviado", "enviaste", "tú:", "tu:", "usted:", "you:"
+  ];
+
+  const isOutHint = (textOrAria) => {
+    const n = normalize(textOrAria);
+    return OUT_HINTS.some(h => n.startsWith(h) || n.includes(` ${h} `));
   };
 
   const getThreadLinks = () => QA('a[href^="/e2ee/t/"], a[href^="/t/"]');
@@ -123,7 +139,6 @@
   };
 
   const clickUnreadDividerIfAny = () => {
-    const normalize = (s) => (s || "").toString().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
     const KEYS = [
       "mensajes no leidos","mensajes no leídos","ver mensajes no leidos","ver mensajes no leídos",
       "nuevos mensajes","new messages","unread messages"
@@ -192,41 +207,56 @@
   };
 
   /* ====================== ÚLTIMO BUBBLE (ROBUSTO) ====================== */
-  // Devuelve { text, dir, count, hash } donde dir: 'in' | 'out'
+  // Devuelve { text, dir, count, hash }
   const getLastBubbleInfo = () => {
     const container = document.body;
-    const bubbles = QA('[data-testid*="message"], [data-testid*="message-container"], [role="row"]', container)
-      .filter(isVisible);
+    const bubbles = QA(
+      '[data-testid*="message"], [data-testid*="message-container"], [role="row"]',
+      container
+    ).filter(isVisible);
+
     const count = bubbles.length;
     for (let i = count - 1; i >= 0; i--) {
       const b = bubbles[i];
 
-      // TEXTO:
-      const nodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', b);
-      const text = nodes.map(n => (n.innerText || n.textContent || "").trim())
-                        .filter(Boolean)
-                        .join("\n")
-                        .replace(/\s+/g, " ")
-                        .trim();
+      // TEXTO del bubble
+      const nodes = QA(
+        'div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p',
+        b
+      );
+      let text = nodes.map(n => (n.innerText || n.textContent || "").trim())
+                      .filter(Boolean)
+                      .join("\n")
+                      .replace(/\s+\n/g, "\n")
+                      .replace(/\n\s+/g, "\n")
+                      .replace(/[ \t]+/g, " ")
+                      .trim();
+
+      // omitir si no hay texto útil
       if (!text) continue;
 
-      // DIRECCIÓN (varias heurísticas combinadas):
+      // ATRIBUTOS
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
       const aria   = (b.getAttribute("aria-label") || "").toLowerCase();
 
-      let dir = null;
+      // Fuerza OUT si hay indicios de recibo/eco ("Has enviado", "You sent", etc.)
+      if (isOutHint(text) || isOutHint(aria)) {
+        const hash = djb2(`out|${text}|#${count}`);
+        return { text, dir: "out", count, hash };
+      }
 
-      // 1) Heurística por testid
+      // Heurística por testid
+      let dir = null;
       if (/incoming/.test(testid)) dir = "in";
       else if (/outgoing/.test(testid)) dir = "out";
 
-      // 2) Heurística por aria (idiomas comunes)
+      // Heurística por aria
       if (!dir) {
         if (/\b(you|tú|vos|usted)\b/.test(aria)) dir = "out";
         else if (aria) dir = "in";
       }
 
-      // 3) Heurística por alineación (derecha = propio)
+      // Alineación (fallback)
       if (!dir) {
         const rect = b.getBoundingClientRect();
         const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
@@ -246,24 +276,27 @@
   /* ====================== KEYS POR HILO ====================== */
   const lastReplyAtKey      = (tid) => k.byThread(tid, "last_reply_at");
   const lastSentHashKey     = (tid) => k.byThread(tid, "last_sent_hash");
-  const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");    // hash del último entrante ya atendido
-  const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");   // snapshot al abrir hilo
+  const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");    // último entrante atendido
+  const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");   // snapshot al abrir
 
   /* ====================== ENVÍO ====================== */
-  const sendText = async (text) => {
+  const sendText = async (tid, text) => {
     if (!text) return false;
     const composer = findComposer();
     if (!composer) return false;
+    // Cooldown post-envío para ignorar mutaciones del DOM
+    sendCooldownUntil.set(tid, now() + CFG.SEND_COOLDOWN_MS);
     pasteMultiline(composer, text);
     setTimeout(() => emitEnter(composer), 30);
     return true;
   };
 
-  /* ====================== MOTOR: SOLO si hay NUEVO ENTRANTE ====================== */
+  /* ====================== MOTOR ====================== */
   const maybeReplyByRules = async (tid) => {
     if (!tid) return false;
-    if (!newIncomingFlag.get(tid)) return false;        // solo si observer lo marcó
-    if (now() < threadSilenceUntil) return false;       // silencio tras cambio de chat
+    if (!newIncomingFlag.get(tid)) return false;
+    if (now() < threadSilenceUntil) return false;
+    if (now() < (sendCooldownUntil.get(tid) || 0)) return false;
 
     if (inFlight.has(tid)) return false;
     inFlight.add(tid);
@@ -275,11 +308,11 @@
       const { text, dir, hash } = getLastBubbleInfo();
       if (!text || dir !== "in") { newIncomingFlag.set(tid, false); return false; }
 
-      // ¿Ya atendimos exactamente este entrante?
+      // ¿Ya atendimos este entrante?
       const lastIn = await S.get(lastIncomingHashKey(tid), "");
       if (String(lastIn) === String(hash)) { newIncomingFlag.set(tid, false); return false; }
 
-      // Buscar regla
+      // Match de reglas
       const compiled = getCompiledRules();
       let reply = null;
       for (const { re, reply: rep } of compiled) {
@@ -287,8 +320,7 @@
       }
 
       if (!reply) {
-        // sin match: marcamos como visto para no insistir hasta nuevo mensaje
-        await S.set(lastIncomingHashKey(tid), hash);
+        await S.set(lastIncomingHashKey(tid), hash); // marcar como visto
         newIncomingFlag.set(tid, false);
         return false;
       }
@@ -302,12 +334,14 @@
         return false;
       }
 
-      const ok = await sendText(reply);
+      const ok = await sendText(tid, reply);
       if (ok) {
         const ts = now();
         await S.set(lastReplyAtKey(tid), ts);
-        await S.set(lastIncomingHashKey(tid), hash);  // este entrante queda atendido
+        await S.set(lastIncomingHashKey(tid), hash);   // este entrante quedó atendido
         await S.set(lastSentHashKey(tid), thisHash);
+        // Actualizamos memoria local para que el observer no re-procese inmediatamente
+        lastBubbleHashMem.set(tid, djb2(`out|${reply}|#${ts}`));
         log("[rules] respuesta enviada");
       }
 
@@ -371,7 +405,7 @@
     document.documentElement.append(wrap);
   };
 
-  const openModal = ({ title, initialValue, placeholder, mono=false, onSave }) => {
+  const openModal = ({ title, initialValue, mono=false, onSave }) => {
     const id = "vz-modal-wrap";
     if (Q("#"+id)) Q("#"+id).remove();
 
@@ -404,7 +438,6 @@
       fontFamily: mono ? "ui-monospace, Menlo, Consolas, monospace" : "inherit",
       fontSize: mono ? "13px" : "14px"
     });
-    ta.placeholder = placeholder || "";
 
     const row = document.createElement("div");
     Object.assign(row.style, { display: "flex", gap: "8px", marginTop: "12px", justifyContent: "flex-end" });
@@ -452,7 +485,8 @@
         const parsed = JSON.parse(val);
         if (!Array.isArray(parsed)) throw new Error("El JSON debe ser un array.");
         parsed.forEach(o => {
-          if (typeof o.pattern !== "string" || typeof o.reply !== "string") throw new Error("Cada regla requiere 'pattern' (string) y 'reply' (string).");
+          if (typeof o.pattern !== "string" || typeof o.reply !== "string")
+            throw new Error("Cada regla requiere 'pattern' (string) y 'reply' (string).");
         });
         rules = parsed;
         await S.set(k.rules, JSON.stringify(parsed, null, 2));
@@ -463,7 +497,6 @@
 
   /* ====================== CAMBIO DE CHAT ====================== */
   const getBaselineHash = () => {
-    // Hash de snapshot al abrir: último bubble (sea in/out) + cantidad
     const { dir, text, count } = getLastBubbleInfo();
     return djb2(`${dir}|${text}|#${count}`);
   };
@@ -474,10 +507,9 @@
     threadSilenceUntil = now() + CFG.THREAD_LOAD_SILENCE_MS;
 
     const base = getBaselineHash();
-    lastBubbleHashMem.set(currentTid, base);        // memoria local (para Observer)
-    await S.set(baselineHashKey(currentTid), base); // baseline persistente
-    await S.set(lastIncomingHashKey(currentTid), base); // tratamos historial visible como ya atendido
-
+    lastBubbleHashMem.set(currentTid, base);
+    await S.set(baselineHashKey(currentTid), base);
+    await S.set(lastIncomingHashKey(currentTid), base);
     log("[thread] cambiado a", currentTid, " baseline:", base);
   };
 
@@ -501,11 +533,8 @@
 
   const tick = async () => {
     if (!enabled) return;
-
-    // No dispara; solo procesa si hay flag (marcado por observer)
     await processCurrentChat();
 
-    // Abrir no leídos si aplica (no envía por sí mismo)
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
@@ -535,16 +564,20 @@
         if (now() < threadSilenceUntil) return;
 
         const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
+
+        // Ignorar mutaciones inmediatamente después de enviar
+        if (now() < (sendCooldownUntil.get(tid) || 0)) return;
+
         const { text, dir, hash } = getLastBubbleInfo();
         if (!text || dir !== "in") return; // último no es entrante ⇒ no hacemos nada
 
         const lastMem = lastBubbleHashMem.get(tid) || "";
         if (lastMem === hash) return; // misma burbuja (mutaciones internas)
 
-        // Es un ENTRANTE nuevo: marcar flag y actualizar memoria local
+        // ENTRANTE nuevo
         lastBubbleHashMem.set(tid, hash);
         newIncomingFlag.set(tid, true);
-        await processCurrentChat(); // procesar de inmediato
+        await processCurrentChat(); // proc. inmediato
       }, 80);
     });
 
@@ -558,12 +591,10 @@
       rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
     } catch { rules = DEFAULT_RULES.slice(); }
 
-    // UI y Observers
     await injectTopBar();
     bootMsgObserver();
     watchURL();
 
-    // Hilo inicial + baseline
     await onThreadChanged(getCurrentThreadIdFromURL());
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
