@@ -14,7 +14,7 @@
         "https://www.messenger.com/*",
         "https://www.facebook.com/messages/*"
       ],
-      "js": ["content.js"],
+      "js": ["ui.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

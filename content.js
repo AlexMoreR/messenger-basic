@@ -1,13 +1,9 @@
-// Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes ENTRANTES reales
-// FIX 2025-10-29 (v2.1):
-// - Fallback por sondeo: si el observer no ve la mutación del bubble, el loop detecta el último IN nuevo y responde.
-// - Observer más agresivo: characterData + attributes y hook directo al contenedor de mensajes.
-// - Mantiene: anti-duplicados, baseline por cambio de hilo, cooldowns y apertura de no leídos.
+// content.js — Lógica del bot (sin UI). Requiere ui.js cargado antes.
+// FIX 2025-10-29 (v2.1 UI-split): Fallback por sondeo + Observer agresivo. UI delegada a window.VZUI.
 
 (() => {
   "use strict";
 
-  /* ====================== CONFIG ====================== */
   const CFG = {
     AUTO_START: true,
     SCAN_EVERY_MS: 1200,
@@ -20,7 +16,6 @@
     DEBUG: true
   };
 
-  // Reglas por defecto
   const DEFAULT_RULES = [
     { pattern: "\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", flags: "i", reply: "¡Mucho gusto! 😊 ¿En qué te ayudo?" },
     { pattern: "precio|valor|cu[aá]nto cuesta|costo", flags: "i", reply: "Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" },
@@ -29,13 +24,11 @@
     { pattern: "^hola\\b|buen[oa]s|saludos", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." }
   ];
 
-  /* ====================== STORAGE KEYS ====================== */
   const k = {
     rules: "__vz_rules_json",
     byThread: (tid, name) => `__vz_thread_${tid}_${name}`
   };
 
-  /* ====================== STORAGE API ====================== */
   const S = {
     async get(key, fallback = null) {
       try {
@@ -63,11 +56,12 @@
     }
   };
 
-  /* ====================== LOG ====================== */
   const log = (...a) => CFG.DEBUG && console.log("[VZ-Bot]", ...a);
   const now = () => Date.now();
+  const Q  = (sel, r=document) => r.querySelector(sel);
+  const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
+  const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
 
-  /* ====================== STATE ====================== */
   let enabled = CFG.AUTO_START;
   let lastClickAt = 0;
   let scanTimer = null;
@@ -77,24 +71,17 @@
   let currentTid = null;
   let threadSilenceUntil = 0;
 
-  // Flags/dedup
   const inFlight = new Set();
-  const newIncomingFlag = new Map();          // tid -> boolean
-  const lastBubbleHashMem = new Map();        // tid -> hash local
-  const sendCooldownUntil = new Map();        // tid -> ts
+  const newIncomingFlag = new Map();
+  const lastBubbleHashMem = new Map();
+  const sendCooldownUntil = new Map();
 
-  // Si abrimos un hilo por "no leído", lo marcamos aquí
   let pendingAutoOpenTid = null;
-
-  /* ====================== HELPERS DOM ====================== */
-  const Q  = (sel, r=document) => r.querySelector(sel);
-  const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
-  const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
 
   const getCurrentThreadIdFromURL = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
-    };
+  };
 
   const djb2 = (s) => {
     s = String(s);
@@ -109,9 +96,7 @@
     .toLowerCase()
     .trim();
 
-  const OUT_HINTS = [
-    "you sent", "has enviado", "enviaste", "tú:", "tu:", "usted:", "you:"
-  ];
+  const OUT_HINTS = ["you sent","has enviado","enviaste","tú:","tu:","usted:","you:"];
 
   const isOutHint = (textOrAria) => {
     const n = normalize(textOrAria);
@@ -209,16 +194,12 @@
     } catch { try { el?.click(); } catch {} }
   };
 
-  /* ====================== ÚLTIMO BUBBLE (ROBUSTO) ====================== */
-  // Devuelve { text, dir, count, hash }
   const getLastBubbleInfo = () => {
-    // Intentar enganchar contenedores típicos de lista de mensajes (virtualizados)
-    const containers = [
-      '[role="grid"] [role="row"]',           // fallback por "rows"
+    const selector = [
+      '[role="grid"] [role="row"]',
       '[data-testid*="message-container"]',
       '[data-testid*="message"]'
-    ];
-    const selector = containers.join(",");
+    ].join(",");
     const bubbles = QA(selector, document.body).filter(isVisible);
     const count = bubbles.length;
 
@@ -267,17 +248,14 @@
     return { text: "", dir: "in", count: 0, hash: "0" };
   };
 
-  /* ====================== REGLAS ====================== */
   const compile = (r) => { try { return { re: new RegExp(r.pattern, r.flags || "i"), reply: r.reply }; } catch { return null; } };
   const getCompiledRules = () => (Array.isArray(rules) ? rules : []).map(compile).filter(Boolean);
 
-  /* ====================== KEYS POR HILO ====================== */
   const lastReplyAtKey      = (tid) => k.byThread(tid, "last_reply_at");
   const lastSentHashKey     = (tid) => k.byThread(tid, "last_sent_hash");
   const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");
   const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");
 
-  /* ====================== ENVÍO ====================== */
   const sendText = async (tid, text) => {
     if (!text) return false;
     const composer = findComposer();
@@ -288,7 +266,6 @@
     return true;
   };
 
-  /* ====================== MOTOR ====================== */
   const maybeReplyByRules = async (tid) => {
     if (!tid) return false;
     if (!newIncomingFlag.get(tid)) return false;
@@ -345,150 +322,6 @@
     }
   };
 
-  /* ====================== UI mínima ====================== */
-  const injectTopBar = async () => {
-    if (Q("#vz-topbar")) return;
-
-    const wrap = document.createElement("div");
-    wrap.id = "vz-topbar";
-    Object.assign(wrap.style, {
-      position: "fixed", top: "8px", left: "50%", transform: "translateX(-50%)",
-      zIndex: 2147483647, pointerEvents: "none"
-    });
-
-    const bar = document.createElement("div");
-    Object.assign(bar.style, {
-      pointerEvents: "auto",
-      background: "rgba(15,15,18,.7)", backdropFilter: "blur(8px)",
-      color: "#fff", font: "13px/1 system-ui, -apple-system, Segoe UI, Roboto",
-      padding: "6px 10px", borderRadius: "10px",
-      display: "flex", gap: "8px", alignItems: "center",
-      boxShadow: "0 8px 30px rgba(0,0,0,.35)"
-    });
-
-    const status = document.createElement("span");
-    status.textContent = enabled ? "Auto: ON" : "Auto: OFF";
-
-    const mkBtn = (label, bg) => {
-      const b = document.createElement("button");
-      b.textContent = label;
-      Object.assign(b.style, {
-        background: bg, color: "#fff", border: "none",
-        borderRadius: "8px", padding: "6px 10px", cursor: "pointer",
-        opacity: .92
-      });
-      b.onmouseenter = () => (b.style.opacity = 1);
-      b.onmouseleave = () => (b.style.opacity = .92);
-      return b;
-    };
-
-    const btnToggle = mkBtn(enabled ? "Pausar" : "Reanudar", enabled ? "#22c55e" : "#525252");
-    btnToggle.onclick = () => {
-      enabled = !enabled;
-      status.textContent = enabled ? "Auto: ON" : "Auto: OFF";
-      btnToggle.textContent = enabled ? "Pausar" : "Reanudar";
-      btnToggle.style.background = enabled ? "#22c55e" : "#525252";
-    };
-
-    const btnRules = mkBtn("Editar reglas", "#7c3aed");
-    btnRules.onclick = () => openRulesModal();
-
-    bar.append(status, btnToggle, btnRules);
-    wrap.append(bar);
-    document.documentElement.append(wrap);
-  };
-
-  const openModal = ({ title, initialValue, mono=false, onSave }) => {
-    const id = "vz-modal-wrap";
-    if (Q("#"+id)) Q("#"+id).remove();
-
-    const overlay = document.createElement("div");
-    overlay.id = id;
-    Object.assign(overlay.style, {
-      position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", backdropFilter: "blur(2px)",
-      zIndex: 2147483647, display: "flex", alignItems: "center", justifyContent: "center"
-    });
-
-    const dialog = document.createElement("div");
-    Object.assign(dialog.style, {
-      width: "min(96vw, 680px)", background: "rgba(24,24,27,.96)", color: "#fff",
-      borderRadius: "14px", border: "1px solid rgba(255,255,255,.08)",
-      boxShadow: "0 24px 80px rgba(0,0,0,.35)", padding: "16px",
-      font: "14px/1.35 system-ui, -apple-system, Segoe UI, Roboto"
-    });
-
-    const h = document.createElement("div");
-    h.textContent = title;
-    Object.assign(h.style, { fontWeight: 700, fontSize: "16px", marginBottom: "8px" });
-
-    const ta = document.createElement("textarea");
-    ta.value = initialValue || "";
-    Object.assign(ta.style, {
-      width: "100%", minHeight: "260px", borderRadius: "10px",
-      border: "1px solid rgba(255,255,255,.15)",
-      background: "rgba(39,39,42,.92)", color: "#fff",
-      padding: "10px 12px", outline: "none", resize: "vertical",
-      fontFamily: mono ? "ui-monospace, Menlo, Consolas, monospace" : "inherit",
-      fontSize: mono ? "13px" : "14px"
-    });
-
-    const row = document.createElement("div");
-    Object.assign(row.style, { display: "flex", gap: "8px", marginTop: "12px", justifyContent: "flex-end" });
-
-    const mkBtn = (txt, bg, bold=false) => {
-      const b = document.createElement("button");
-      b.textContent = txt;
-      Object.assign(b.style, {
-        background: bg, color: "#fff", border: "none",
-        borderRadius: "10px", padding: "8px 12px", cursor: "pointer",
-        fontWeight: bold ? 700 : 500
-      });
-      return b;
-    };
-
-    const cancel = mkBtn("Cancelar", "#6b7280");
-    const save = mkBtn("Guardar", "#22c55e", true);
-
-    cancel.onclick = () => overlay.remove();
-    save.onclick = async () => {
-      try { await onSave(ta.value); overlay.remove(); } catch (e) { alert(e?.message || e); }
-    };
-
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
-    overlay.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { e.preventDefault(); overlay.remove(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); save.click(); }
-    });
-
-    dialog.append(h, ta, row);
-    row.append(cancel, save);
-    overlay.append(dialog);
-    document.documentElement.append(overlay);
-    setTimeout(() => ta.focus(), 0);
-  };
-
-  const openRulesModal = async () => {
-    let raw = await S.get(k.rules, null);
-    if (!raw) raw = JSON.stringify(DEFAULT_RULES, null, 2);
-    openModal({
-      title: "Editar reglas del chatbot (JSON: [{ pattern, flags?, reply }])",
-      initialValue: raw,
-      mono: true,
-      onSave: async (val) => {
-        const parsed = JSON.parse(val);
-        if (!Array.isArray(parsed)) throw new Error("El JSON debe ser un array.");
-        parsed.forEach(o => {
-          if (typeof o.pattern !== "string" || typeof o.reply !== "string")
-            throw new Error("Cada regla requiere 'pattern' (string) y 'reply' (string).");
-        });
-        rules = parsed;
-        await S.set(k.rules, JSON.stringify(parsed, null, 2));
-        log("Reglas guardadas");
-      }
-    });
-  };
-
-  /* ====================== CAMBIO DE CHAT ====================== */
   const getBaselineHash = () => {
     const { dir, text, count } = getLastBubbleInfo();
     return djb2(`${dir}|${text}|#${count}`);
@@ -531,7 +364,6 @@
     setInterval(check, 300);
   };
 
-  /* ====================== LOOP (con fallback por sondeo) ====================== */
   const processCurrentChat = async () => {
     const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
     await maybeReplyByRules(tid);
@@ -543,13 +375,11 @@
     const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
 
     // === FALLBACK POR SONDEO ===
-    // Si el observer no marcó newIncomingFlag, comparamos hashes manualmente
     if (now() >= (sendCooldownUntil.get(tid) || 0) && now() >= threadSilenceUntil) {
       const { text, dir, hash } = getLastBubbleInfo();
       if (text && dir === "in") {
         const lastMem = lastBubbleHashMem.get(tid) || "";
         if (lastMem !== hash) {
-          // Entrante nuevo detectado por sondeo
           lastBubbleHashMem.set(tid, hash);
           newIncomingFlag.set(tid, true);
         }
@@ -558,7 +388,6 @@
 
     await processCurrentChat();
 
-    // Apertura de no leídos
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
@@ -574,9 +403,7 @@
     }
   };
 
-  /* ====================== OBSERVER (más agresivo) ====================== */
   const getMessagesRoot = () => {
-    // Intentos comunes de contenedor de mensajes
     return (
       Q('[role="grid"]') ||
       Q('[data-testid="mwthreadlist"]') ||
@@ -609,7 +436,6 @@
         const lastMem = lastBubbleHashMem.get(tid) || "";
         if (lastMem === hash) return;
 
-        // ENTRANTE nuevo detectado por observer
         lastBubbleHashMem.set(tid, hash);
         newIncomingFlag.set(tid, true);
         await processCurrentChat();
@@ -619,26 +445,48 @@
     const opts = {
       childList: true,
       subtree: true,
-      characterData: true,        // <- más agresivo
-      attributes: true,           // <- más agresivo (tip/typing cambia attrs)
+      characterData: true,
+      attributes: true,
       attributeFilter: ["aria-label", "data-testid", "class", "dir"]
     };
 
     msgObserver.observe(root, opts);
-    if (root !== document.body) {
-      // Observa también body por si Messenger monta overlays fuera del root
-      msgObserver.observe(document.body, opts);
-    }
+    if (root !== document.body) msgObserver.observe(document.body, opts);
   };
 
-  /* ====================== INIT ====================== */
+  // ==== UI BINDINGS (usa window.VZUI de ui.js) ====
+  const loadRulesJson = async () => {
+    let raw = await S.get(k.rules, null);
+    if (!raw) raw = JSON.stringify(DEFAULT_RULES, null, 2);
+    return raw;
+  };
+  const saveRulesJson = async (raw) => {
+    rules = JSON.parse(raw);
+    await S.set(k.rules, JSON.stringify(rules, null, 2));
+    console.log("[VZ-Bot] Reglas guardadas");
+  };
+
+  const bindUI = () => {
+    if (!window.VZUI) return console.warn("VZUI no encontrado. Asegúrate de cargar ui.js antes que content.js.");
+
+    window.VZUI.injectTopBar({
+      getEnabled: () => enabled,
+      setEnabled: (v) => { enabled = !!v; },
+      onOpenRules: () => window.VZUI.openRulesModal({
+        loadRules: () => loadRulesJson(),
+        saveRules: (raw) => saveRulesJson(raw)
+      })
+    });
+  };
+
+  // ==== INIT ====
   const init = async () => {
     try {
       const r = await S.get(k.rules, null);
       rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
     } catch { rules = DEFAULT_RULES.slice(); }
 
-    await injectTopBar();
+    bindUI();
     bootMsgObserver();
     watchURL();
 
@@ -649,12 +497,12 @@
   };
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => enabled && init(), { once: true });
+    document.addEventListener("DOMContentLoaded", () => CFG.AUTO_START && init(), { once: true });
   } else {
-    enabled && init();
+    CFG.AUTO_START && init();
   }
 
-  /* ====================== CONSOLA (debug) ====================== */
+  // ==== API debug ====
   window.__vzBot = {
     on: () => { enabled = true; },
     off: () => { enabled = false; },
