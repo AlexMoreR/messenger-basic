@@ -1,10 +1,8 @@
 // Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes ENTRANTES reales
-// FIX 2025-10-29 (v2):
-// - Si llega un mensaje NUEVO en otro chat, al abrir el "no leído" se responde de inmediato.
-// - No marcamos como atendido (baseline) cuando el hilo se abrió por ser "no leído".
-// - Dirección 'in/out' robusta (detecta "Has enviado / You sent" como OUT).
-// - Cooldown post-envío para ignorar mutaciones del DOM.
-// - Anti-duplicados por hash de entrante y de respuesta.
+// FIX 2025-10-29 (v2.1):
+// - Fallback por sondeo: si el observer no ve la mutación del bubble, el loop detecta el último IN nuevo y responde.
+// - Observer más agresivo: characterData + attributes y hook directo al contenedor de mensajes.
+// - Mantiene: anti-duplicados, baseline por cambio de hilo, cooldowns y apertura de no leídos.
 
 (() => {
   "use strict";
@@ -12,12 +10,12 @@
   /* ====================== CONFIG ====================== */
   const CFG = {
     AUTO_START: true,
-    SCAN_EVERY_MS: 1200,           // loop ligero (no dispara envíos)
-    CLICK_COOLDOWN_MS: 8000,       // anti-spam al abrir no leídos
-    REPLY_COOLDOWN_MS: 12000,      // mínimo entre respuestas por hilo
-    OPEN_UNREAD: true,             // abrir no leídos (no envía por sí mismo)
-    THREAD_LOAD_SILENCE_MS: 600,   // silencio tras cambiar de chat
-    SEND_COOLDOWN_MS: 1200,        // silencio tras enviar (mutaciones post-envío)
+    SCAN_EVERY_MS: 1200,
+    CLICK_COOLDOWN_MS: 8000,
+    REPLY_COOLDOWN_MS: 12000,
+    OPEN_UNREAD: true,
+    THREAD_LOAD_SILENCE_MS: 600,
+    SEND_COOLDOWN_MS: 1200,
     DEFAULT_FALLBACK: "",
     DEBUG: true
   };
@@ -80,12 +78,12 @@
   let threadSilenceUntil = 0;
 
   // Flags/dedup
-  const inFlight = new Set();                 // mutex por hilo
-  const newIncomingFlag = new Map();          // tid -> boolean (solo procesa si true)
-  const lastBubbleHashMem = new Map();        // tid -> hash local (mutaciones)
-  const sendCooldownUntil = new Map();        // tid -> ts (ignorar mutaciones post-envío)
+  const inFlight = new Set();
+  const newIncomingFlag = new Map();          // tid -> boolean
+  const lastBubbleHashMem = new Map();        // tid -> hash local
+  const sendCooldownUntil = new Map();        // tid -> ts
 
-  // *** NUEVO: si abrimos un hilo porque era "no leído", lo marcamos aquí para forzar respuesta ***
+  // Si abrimos un hilo por "no leído", lo marcamos aquí
   let pendingAutoOpenTid = null;
 
   /* ====================== HELPERS DOM ====================== */
@@ -96,7 +94,7 @@
   const getCurrentThreadIdFromURL = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
-  };
+    };
 
   const djb2 = (s) => {
     s = String(s);
@@ -214,17 +212,18 @@
   /* ====================== ÚLTIMO BUBBLE (ROBUSTO) ====================== */
   // Devuelve { text, dir, count, hash }
   const getLastBubbleInfo = () => {
-    const container = document.body;
-    const bubbles = QA(
-      '[data-testid*="message"], [data-testid*="message-container"], [role="row"]',
-      container
-    ).filter(isVisible);
-
+    // Intentar enganchar contenedores típicos de lista de mensajes (virtualizados)
+    const containers = [
+      '[role="grid"] [role="row"]',           // fallback por "rows"
+      '[data-testid*="message-container"]',
+      '[data-testid*="message"]'
+    ];
+    const selector = containers.join(",");
+    const bubbles = QA(selector, document.body).filter(isVisible);
     const count = bubbles.length;
+
     for (let i = count - 1; i >= 0; i--) {
       const b = bubbles[i];
-
-      // TEXTO del bubble
       const nodes = QA(
         'div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p',
         b
@@ -239,28 +238,23 @@
 
       if (!text) continue;
 
-      // ATRIBUTOS
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
       const aria   = (b.getAttribute("aria-label") || "").toLowerCase();
 
-      // Fuerza OUT si hay indicios de eco ("Has enviado", "You sent", etc.)
       if (isOutHint(text) || isOutHint(aria)) {
         const hash = djb2(`out|${text}|#${count}`);
         return { text, dir: "out", count, hash };
       }
 
-      // Heurística por testid
       let dir = null;
       if (/incoming/.test(testid)) dir = "in";
       else if (/outgoing/.test(testid)) dir = "out";
 
-      // Heurística por aria
       if (!dir) {
         if (/\b(you|tú|vos|usted)\b/.test(aria)) dir = "out";
         else if (aria) dir = "in";
       }
 
-      // Alineación (fallback)
       if (!dir) {
         const rect = b.getBoundingClientRect();
         const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
@@ -280,15 +274,14 @@
   /* ====================== KEYS POR HILO ====================== */
   const lastReplyAtKey      = (tid) => k.byThread(tid, "last_reply_at");
   const lastSentHashKey     = (tid) => k.byThread(tid, "last_sent_hash");
-  const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");    // último entrante atendido
-  const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");   // snapshot al abrir
+  const lastIncomingHashKey = (tid) => k.byThread(tid, "last_in_hash");
+  const baselineHashKey     = (tid) => k.byThread(tid, "baseline_hash");
 
   /* ====================== ENVÍO ====================== */
   const sendText = async (tid, text) => {
     if (!text) return false;
     const composer = findComposer();
     if (!composer) return false;
-    // Cooldown post-envío para ignorar mutaciones del DOM
     sendCooldownUntil.set(tid, now() + CFG.SEND_COOLDOWN_MS);
     pasteMultiline(composer, text);
     setTimeout(() => emitEnter(composer), 30);
@@ -312,11 +305,9 @@
       const { text, dir, hash } = getLastBubbleInfo();
       if (!text || dir !== "in") { newIncomingFlag.set(tid, false); return false; }
 
-      // ¿Ya atendimos este entrante?
       const lastIn = await S.get(lastIncomingHashKey(tid), "");
       if (String(lastIn) === String(hash)) { newIncomingFlag.set(tid, false); return false; }
 
-      // Match de reglas
       const compiled = getCompiledRules();
       let reply = null;
       for (const { re, reply: rep } of compiled) {
@@ -324,12 +315,11 @@
       }
 
       if (!reply) {
-        await S.set(lastIncomingHashKey(tid), hash); // marcar como visto
+        await S.set(lastIncomingHashKey(tid), hash);
         newIncomingFlag.set(tid, false);
         return false;
       }
 
-      // Anti-repetir MISMA respuesta consecutiva
       const lastSent = await S.get(lastSentHashKey(tid), "");
       const thisHash = djb2(reply);
       if (String(lastSent) === String(thisHash)) {
@@ -342,9 +332,8 @@
       if (ok) {
         const ts = now();
         await S.set(lastReplyAtKey(tid), ts);
-        await S.set(lastIncomingHashKey(tid), hash);   // este entrante quedó atendido
+        await S.set(lastIncomingHashKey(tid), hash);
         await S.set(lastSentHashKey(tid), thisHash);
-        // Actualizamos memoria local para que el observer no re-procese inmediatamente
         lastBubbleHashMem.set(tid, djb2(`out|${reply}|#${ts}`));
         log("[rules] respuesta enviada");
       }
@@ -514,22 +503,15 @@
     const base = getBaselineHash();
 
     if (pendingAutoOpenTid && pendingAutoOpenTid === tid) {
-      // *** Caso: abrimos este hilo porque estaba "no leído" ***
-      // No marcamos baseline como "atendido" ni memoria local,
-      // y forzamos proceso tras el silencio de carga.
       await S.set(baselineHashKey(tid), base);
-
       setTimeout(() => {
-        // Forzamos que el último bubble entrante se procese
         newIncomingFlag.set(tid, true);
-        // Importante: no tocar lastBubbleHashMem para que no bloquee
         maybeReplyByRules(tid);
       }, CFG.THREAD_LOAD_SILENCE_MS + 50);
 
       log("[thread] abierto por NO LEÍDO → procesar último entrante", tid, " baseline:", base);
       pendingAutoOpenTid = null;
     } else {
-      // Cambio normal (manual o por navegación): snapshot y lo marcamos como atendido
       lastBubbleHashMem.set(tid, base);
       await S.set(baselineHashKey(tid), base);
       await S.set(lastIncomingHashKey(tid), base);
@@ -549,7 +531,7 @@
     setInterval(check, 300);
   };
 
-  /* ====================== LOOP ====================== */
+  /* ====================== LOOP (con fallback por sondeo) ====================== */
   const processCurrentChat = async () => {
     const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
     await maybeReplyByRules(tid);
@@ -557,16 +539,33 @@
 
   const tick = async () => {
     if (!enabled) return;
+
+    const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
+
+    // === FALLBACK POR SONDEO ===
+    // Si el observer no marcó newIncomingFlag, comparamos hashes manualmente
+    if (now() >= (sendCooldownUntil.get(tid) || 0) && now() >= threadSilenceUntil) {
+      const { text, dir, hash } = getLastBubbleInfo();
+      if (text && dir === "in") {
+        const lastMem = lastBubbleHashMem.get(tid) || "";
+        if (lastMem !== hash) {
+          // Entrante nuevo detectado por sondeo
+          lastBubbleHashMem.set(tid, hash);
+          newIncomingFlag.set(tid, true);
+        }
+      }
+    }
+
     await processCurrentChat();
 
+    // Apertura de no leídos
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
-        // Elegimos un no leído distinto al actual si es posible
         const candidate = links.find(a => getThreadIdFromHref(a.getAttribute("href")) !== currentTid) || links[0];
         if (candidate) {
           const hrefTid = getThreadIdFromHref(candidate.getAttribute("href"));
-          pendingAutoOpenTid = hrefTid || null; // *** clave: marcar que lo abrimos por "no leído"
+          pendingAutoOpenTid = hrefTid || null;
           lastClickAt = now();
           realClick(candidate);
           setTimeout(() => { clickUnreadDividerIfAny(); }, 200);
@@ -575,12 +574,23 @@
     }
   };
 
-  /* ====================== OBSERVER: marca SOLO NUEVO ENTRANTE ====================== */
+  /* ====================== OBSERVER (más agresivo) ====================== */
+  const getMessagesRoot = () => {
+    // Intentos comunes de contenedor de mensajes
+    return (
+      Q('[role="grid"]') ||
+      Q('[data-testid="mwthreadlist"]') ||
+      Q('[data-pagelet*="Pagelet"]') ||
+      document.body
+    );
+  };
+
   const bootMsgObserver = () => {
     if (msgObserver) return;
 
-    let moQueued = false;
+    const root = getMessagesRoot();
 
+    let moQueued = false;
     msgObserver = new MutationObserver(() => {
       if (moQueued) return;
       moQueued = true;
@@ -591,24 +601,34 @@
         if (now() < threadSilenceUntil) return;
 
         const tid = currentTid || getCurrentThreadIdFromURL() || "unknown";
-
-        // Ignorar mutaciones inmediatamente después de enviar
         if (now() < (sendCooldownUntil.get(tid) || 0)) return;
 
         const { text, dir, hash } = getLastBubbleInfo();
-        if (!text || dir !== "in") return; // último no es entrante ⇒ no hacemos nada
+        if (!text || dir !== "in") return;
 
         const lastMem = lastBubbleHashMem.get(tid) || "";
-        if (lastMem === hash) return; // misma burbuja (mutaciones internas)
+        if (lastMem === hash) return;
 
-        // ENTRANTE nuevo
+        // ENTRANTE nuevo detectado por observer
         lastBubbleHashMem.set(tid, hash);
         newIncomingFlag.set(tid, true);
-        await processCurrentChat(); // proc. inmediato
+        await processCurrentChat();
       }, 80);
     });
 
-    msgObserver.observe(document.body, { childList: true, subtree: true });
+    const opts = {
+      childList: true,
+      subtree: true,
+      characterData: true,        // <- más agresivo
+      attributes: true,           // <- más agresivo (tip/typing cambia attrs)
+      attributeFilter: ["aria-label", "data-testid", "class", "dir"]
+    };
+
+    msgObserver.observe(root, opts);
+    if (root !== document.body) {
+      // Observa también body por si Messenger monta overlays fuera del root
+      msgObserver.observe(document.body, opts);
+    }
   };
 
   /* ====================== INIT ====================== */
