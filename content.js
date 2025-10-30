@@ -1,15 +1,17 @@
-// Messenger Chatbot — SOLO REGLAS — Contexto por hilo + anti-duplicados (FIX carreras)
+// Messenger Chatbot — SOLO REGLAS — Responder SOLO cuando llega mensaje nuevo (FIX definitivo)
+// Fecha: 2025-10-29
+
 (() => {
   "use strict";
 
   /* ====================== CONFIG ====================== */
   const CFG = {
     AUTO_START: true,
-    SCAN_EVERY_MS: 1000,          // loop de escaneo ligero
-    CLICK_COOLDOWN_MS: 8000,      // anti-spam de cambios de chat
+    SCAN_EVERY_MS: 1200,          // loop de escaneo ligero (no dispara envíos)
+    CLICK_COOLDOWN_MS: 8000,      // anti-spam al abrir chats no leídos
     REPLY_COOLDOWN_MS: 12000,     // intervalo mínimo entre respuestas por hilo
-    OPEN_UNREAD: true,            // abrir chats no leídos para contestar
-    DEFAULT_FALLBACK: "",         // "" = no enviar nada si no hay match
+    OPEN_UNREAD: true,            // abrir chats no leídos (no enviará si no hay mensaje nuevo)
+    DEFAULT_FALLBACK: "",         // "" = no enviar nada si no hay match de regla
     DEBUG: true
   };
 
@@ -25,8 +27,7 @@
   /* ====================== STORAGE ====================== */
   const k = {
     rules: "__vz_rules_json",
-    globals: (name) => `__vz_global_${name}`,
-    byThread: (threadId, name) => `__vz_thread_${threadId}_${name}`
+    byThread: (tid, name) => `__vz_thread_${tid}_${name}`
   };
 
   const S = {
@@ -38,8 +39,8 @@
         }
       } catch {}
       try {
-        const v = localStorage.getItem(key);
-        return v === null ? fallback : JSON.parse(v);
+        const raw = localStorage.getItem(key);
+        return raw === null ? fallback : JSON.parse(raw);
       } catch {
         const raw = localStorage.getItem(key);
         return raw ?? fallback;
@@ -67,10 +68,14 @@
   let msgObserver = null;
   let rules = null;
 
-  // Mutex por hilo para evitar condiciones de carrera
+  // Mutex por hilo
   const inFlight = new Set();
 
-  /* ====================== HELPERS DOM ====================== */
+  // Bandera: solo responder si LLEGÓ un mensaje entrante real
+  // (se activa desde MutationObserver y se consume/limpia al procesar)
+  const newIncomingFlag = new Map(); // tid -> boolean
+
+  /* ====================== HELPERS ====================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
   const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
   const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
@@ -78,6 +83,52 @@
   const getCurrentThreadId = () => {
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
+  };
+
+  const djb2 = (s) => {
+    let h = 5381;
+    for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i);
+    return String(h >>> 0);
+  };
+
+  const getThreadLinks = () => QA('a[href^="/e2ee/t/"], a[href^="/t/"]');
+  const getThreadIdFromHref = (href) => href?.match?.(/\/(?:e2ee\/)?t\/([^/?#]+)/)?.[1] || null;
+
+  const looksUnread = (row) => {
+    if (!row) return false;
+    if (row.querySelector('[data-testid*="unread"]')) return true;
+    if (/no\s*le[ií]d[oa]s?|nuevo|unread/i.test(row.textContent || "")) return true;
+    for (const n of row.querySelectorAll("span,div")) {
+      const fw = parseInt(getComputedStyle(n).fontWeight || "400", 10);
+      if (fw >= 600) return true;
+    }
+    return false;
+  };
+
+  const findUnread = () => {
+    const unread = [];
+    for (const a of getThreadLinks()) {
+      const row = a.closest('[role="row"], li, [data-visualcompletion]') || a.parentElement;
+      if (row && looksUnread(row)) unread.push(a);
+    }
+    return unread;
+  };
+
+  const clickUnreadDividerIfAny = () => {
+    const normalize = (s) => (s || "").toString().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+    const KEYS = [
+      "mensajes no leidos","mensajes no leídos","ver mensajes no leidos","ver mensajes no leídos",
+      "nuevos mensajes","new messages","unread messages"
+    ].map(normalize);
+
+    for (const el of QA("div,span,button,a")) {
+      if (!isVisible(el)) continue;
+      const t = normalize(el.innerText || el.textContent || "");
+      if (KEYS.some(k => t.includes(k))) {
+        try { el.scrollIntoView({ block: "center" }); el.click(); return true; } catch {}
+      }
+    }
+    return false;
   };
 
   const findComposer = () => {
@@ -132,47 +183,6 @@
     } catch { try { el?.click(); } catch {} }
   };
 
-  /* ====================== UNREAD LIST ====================== */
-  const getThreadLinks = () => QA('a[href^="/e2ee/t/"], a[href^="/t/"]');
-  const getThreadIdFromHref = (href) => href?.match?.(/\/(?:e2ee\/)?t\/([^/?#]+)/)?.[1] || null;
-
-  const looksUnread = (row) => {
-    if (!row) return false;
-    if (row.querySelector('[data-testid*="unread"]')) return true;
-    if (/no\s*le[ií]d[oa]s?|nuevo|unread/i.test(row.textContent || "")) return true;
-    for (const n of row.querySelectorAll("span,div")) {
-      const fw = parseInt(getComputedStyle(n).fontWeight || "400", 10);
-      if (fw >= 600) return true;
-    }
-    return false;
-  };
-
-  const findUnread = () => {
-    const unread = [];
-    for (const a of getThreadLinks()) {
-      const row = a.closest('[role="row"], li, [data-visualcompletion]') || a.parentElement;
-      if (row && looksUnread(row)) unread.push(a);
-    }
-    return unread;
-  };
-
-  const clickUnreadDividerIfAny = () => {
-    const normalize = (s) => (s || "").toString().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
-    const KEYS = [
-      "mensajes no leidos","mensajes no leídos","ver mensajes no leidos","ver mensajes no leídos",
-      "nuevos mensajes","new messages","unread messages"
-    ].map(normalize);
-
-    for (const el of QA("div,span,button,a")) {
-      if (!isVisible(el)) continue;
-      const t = normalize(el.innerText || el.textContent || "");
-      if (KEYS.some(k => t.includes(k))) {
-        try { el.scrollIntoView({ block: "center" }); el.click(); return true; } catch {}
-      }
-    }
-    return false;
-  };
-
   /* ====================== REGLAS ====================== */
   const compile = (r) => {
     try { return { re: new RegExp(r.pattern, r.flags || "i"), reply: r.reply }; }
@@ -181,30 +191,44 @@
 
   const getCompiledRules = () => (Array.isArray(rules) ? rules : []).map(compile).filter(Boolean);
 
-  /* ====================== HASH/DEDUP ====================== */
-  const djb2 = (s) => {
-    let h = 5381;
-    for (let i=0;i<s.length;i++) h = ((h<<5)+h) + s.charCodeAt(i);
-    return String(h >>> 0);
-  };
+  /* ====================== KEYS POR HILO ====================== */
+  const lastReplyAtKey     = (tid) => k.byThread(tid, "last_reply_at");
+  const lastSentHashKey    = (tid) => k.byThread(tid, "last_sent_hash");
+  const lastIncomingHashKey= (tid) => k.byThread(tid, "last_in_hash");
+  const threadContextKey   = (tid) => k.byThread(tid, "context_text");
 
-  const lastIncomingKey = (tid) => k.byThread(tid, "last_in_hash");
-  const lastReplyAtKey = (tid) => k.byThread(tid, "last_reply_at");
-  const lastSentHashKey = (tid) => k.byThread(tid, "last_sent_hash");
-  const threadContextKey = (tid) => k.byThread(tid, "context_text");
-
-  /* ====================== CAPTURA MENSAJE ENTRANTE ====================== */
+  /* ====================== DETECCIÓN DE ENTRANTE ====================== */
+  // Devuelve texto del ÚLTIMO mensaje ENTRANTE (del cliente), normalizado
   const getLastIncomingText = () => {
     const bubbles = QA('[data-testid*="message"], [data-testid*="message-container"], [role="row"]').filter(isVisible);
     for (let i=bubbles.length-1;i>=0;i--) {
       const b = bubbles[i];
       const aria = (b.getAttribute("aria-label") || "").toLowerCase();
-      if (/\b(you|tú)\b/.test(aria)) continue; // descartar “tú”
+      // descarta burbujas de "tú/you" (las nuestras)
+      if (/\b(you|tú)\b/.test(aria)) continue;
       const nodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', b);
       const text = nodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n").trim();
-      if (text) return text;
+      if (text) return text.replace(/\s+/g, " ");
     }
     return null;
+  };
+
+  // Determina si un nodo agregado es una BURBUJA ENTRANTE (del cliente)
+  const isIncomingBubbleNode = (node) => {
+    if (!(node instanceof HTMLElement)) return false;
+    // Buscar un contenedor de mensaje dentro del nodo
+    const bubble = node.matches?.('[data-testid*="message"], [data-testid*="message-container"], [role="row"]')
+      ? node
+      : node.querySelector?.('[data-testid*="message"], [data-testid*="message-container"], [role="row"]');
+    if (!bubble || !isVisible(bubble)) return false;
+    const aria = (bubble.getAttribute("aria-label") || "").toLowerCase();
+    // si contiene "you" o "tú" => es propio; lo ignoramos
+    if (/\b(you|tú)\b/.test(aria)) return false;
+
+    // Verifica que tenga texto
+    const textNodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', bubble);
+    const t = textNodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n").trim();
+    return !!t;
   };
 
   /* ====================== ENVÍO ====================== */
@@ -217,68 +241,77 @@
     return true;
   };
 
-  /* ====================== MOTOR REGLAS (con mutex) ====================== */
+  /* ====================== MOTOR: SOLO si hay NUEVO entrante ====================== */
   const maybeReplyByRules = async (tid) => {
-    // Mutex por hilo: evita carreras entre tick/observer/callbacks
+    if (!tid) return false;
+
+    // Solo procesar si el observer marcó entradas nuevas para ESTE hilo
+    if (!newIncomingFlag.get(tid)) return false;
+
+    // mutex por hilo
     if (inFlight.has(tid)) return false;
     inFlight.add(tid);
 
     try {
+      // Cooldown por hilo
       const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
-      if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) return false;
+      if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) { newIncomingFlag.set(tid, false); return false; }
 
       const text = getLastIncomingText();
-      if (!text) return false;
+      if (!text) { newIncomingFlag.set(tid, false); return false; }
 
       const inHash = djb2(text);
-      const lastIn = await S.get(lastIncomingKey(tid), "");
-      if (String(lastIn) === String(inHash)) return false; // ya procesado
+      const lastIn = await S.get(lastIncomingHashKey(tid), "");
+      if (String(lastIn) === String(inHash)) { // ya procesado este mismo entrante
+        newIncomingFlag.set(tid, false);
+        return false;
+      }
 
+      // Buscar regla
       const compiled = getCompiledRules();
       let reply = null;
       for (const { re, reply: rep } of compiled) {
         if (re.test(text)) { reply = rep; break; }
       }
-      if (!reply) reply = (CFG.DEFAULT_FALLBACK || "").trim();
+
       if (!reply) {
-        await S.set(lastIncomingKey(tid), inHash);
+        // sin match: marcar como procesado para no reintentar hasta que llegue otro mensaje
+        await S.set(lastIncomingHashKey(tid), inHash);
+        newIncomingFlag.set(tid, false);
         return false;
       }
 
-      // Evita eco si lo último visible ya es exactamente el mismo reply
-      if (getLastIncomingText() === reply) {
-        await S.set(lastIncomingKey(tid), inHash);
-        return false;
-      }
-
-      // Anti repetir exactamente la misma respuesta consecutiva
+      // Anti-repetir misma respuesta consecutiva
       const lastSent = await S.get(lastSentHashKey(tid), "");
       const thisHash = djb2(reply);
       if (String(lastSent) === String(thisHash)) {
-        await S.set(lastIncomingKey(tid), inHash);
+        await S.set(lastIncomingHashKey(tid), inHash);
+        newIncomingFlag.set(tid, false);
         return false;
       }
 
-      // Contexto por hilo
+      // Contexto opcional
       const ctx = (await S.get(threadContextKey(tid), "") || "").trim();
       const toSend = ctx ? `${ctx}\n\n${reply}` : reply;
 
       const ok = await sendText(toSend);
       if (ok) {
-        const nowTs = now();
-        await S.set(lastReplyAtKey(tid), nowTs);
-        await S.set(lastIncomingKey(tid), inHash);
+        const ts = now();
+        await S.set(lastReplyAtKey(tid), ts);
+        await S.set(lastIncomingHashKey(tid), inHash); // marcamos este entrante como ya atendido
         await S.set(lastSentHashKey(tid), thisHash);
         log("[rules] respuesta enviada");
-        return true;
       }
-      return false;
+
+      // SIEMPRE limpiar la bandera: solo se activa cuando entre NUEVO mensaje real
+      newIncomingFlag.set(tid, false);
+      return !!ok;
     } finally {
       inFlight.delete(tid);
     }
   };
 
-  /* ====================== UI: Topbar + Modales ====================== */
+  /* ====================== UI (compacta) ====================== */
   const injectTopBar = async () => {
     if (Q("#vz-topbar")) return;
 
@@ -292,15 +325,10 @@
     const bar = document.createElement("div");
     Object.assign(bar.style, {
       pointerEvents: "auto",
-      background: "rgba(15,15,18,.7)",
-      backdropFilter: "blur(8px)",
-      color: "#fff",
-      font: "13px/1 system-ui, -apple-system, Segoe UI, Roboto",
-      padding: "6px 10px",
-      borderRadius: "10px",
-      display: "flex",
-      gap: "8px",
-      alignItems: "center",
+      background: "rgba(15,15,18,.7)", backdropFilter: "blur(8px)",
+      color: "#fff", font: "13px/1 system-ui, -apple-system, Segoe UI, Roboto",
+      padding: "6px 10px", borderRadius: "10px",
+      display: "flex", gap: "8px", alignItems: "center",
       boxShadow: "0 8px 30px rgba(0,0,0,.35)"
     });
 
@@ -311,12 +339,8 @@
       const b = document.createElement("button");
       b.textContent = label;
       Object.assign(b.style, {
-        background: bg,
-        color: "#fff",
-        border: "none",
-        borderRadius: "8px",
-        padding: "6px 10px",
-        cursor: "pointer",
+        background: bg, color: "#fff", border: "none",
+        borderRadius: "8px", padding: "6px 10px", cursor: "pointer",
         opacity: .92
       });
       b.onmouseenter = () => (b.style.opacity = 1);
@@ -343,7 +367,6 @@
     document.documentElement.append(wrap);
   };
 
-  // ---- Modal genérico
   const openModal = ({ title, initialValue, placeholder, mono=false, onSave }) => {
     const id = "vz-modal-wrap";
     if (Q("#"+id)) Q("#"+id).remove();
@@ -448,7 +471,7 @@
     });
   };
 
-  /* ====================== LOOP ====================== */
+  /* ====================== LOOP (no dispara respuestas) ====================== */
   const processCurrentChat = async () => {
     const tid = getCurrentThreadId() || "unknown";
     await maybeReplyByRules(tid);
@@ -457,10 +480,10 @@
   const tick = async () => {
     if (!enabled) return;
 
-    // 1) prioriza procesar el chat actual (nuevo mensaje entrante)
+    // No responde por timer; solo procesa si el observer marcó mensaje nuevo
     await processCurrentChat();
 
-    // 2) abrir un no leído diferente si está habilitado
+    // Abrir no leídos si corresponde (no envía nada por sí mismo)
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
@@ -471,6 +494,7 @@
           realClick(candidate);
           setTimeout(() => {
             clickUnreadDividerIfAny();
+            // Solo se responderá si el observer marca nuevo entrante
             processCurrentChat();
           }, 200);
         }
@@ -478,21 +502,54 @@
     }
   };
 
-  /* ====================== OBSERVADORES (debounce) ====================== */
+  /* ====================== OBSERVER: activa bandera SOLO con entrantes ====================== */
   const bootMsgObserver = () => {
     if (msgObserver) return;
 
     let moQueued = false;
-    const fire = () => {
-      if (!enabled) return;
-      processCurrentChat();
+
+    const markIfIncoming = (node) => {
+      try {
+        if (isIncomingBubbleNode(node)) {
+          const tid = getCurrentThreadId() || "unknown";
+          newIncomingFlag.set(tid, true);
+          return true;
+        }
+        // también revisar hijos
+        const els = node.querySelectorAll?.('*');
+        if (!els) return false;
+        for (const el of els) {
+          if (isIncomingBubbleNode(el)) {
+            const tid = getCurrentThreadId() || "unknown";
+            newIncomingFlag.set(tid, true);
+            return true;
+          }
+        }
+      } catch {}
+      return false;
     };
 
-    msgObserver = new MutationObserver(() => {
+    msgObserver = new MutationObserver((mutList) => {
+      let incomingDetected = false;
+      for (const m of mutList) {
+        if (m.type === "childList" && m.addedNodes?.length) {
+          for (const n of m.addedNodes) {
+            if (markIfIncoming(n)) { incomingDetected = true; break; }
+          }
+          if (incomingDetected) break;
+        }
+      }
+      if (!incomingDetected) return;
+
       if (moQueued) return;
       moQueued = true;
-      setTimeout(() => { moQueued = false; fire(); }, 120); // debounce corto
+      setTimeout(() => {
+        moQueued = false;
+        if (!enabled) return;
+        processCurrentChat(); // ahora sí procesará y luego limpiará la bandera
+      }, 100);
     });
+
     msgObserver.observe(document.body, { childList: true, subtree: true });
   };
 
@@ -507,7 +564,7 @@
     bootMsgObserver();
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo (solo reglas). Hilo:", getCurrentThreadId());
+    log("Bot listo (solo reglas, responde SOLO con entrantes nuevos). Hilo:", getCurrentThreadId());
     tick();
   };
 
@@ -529,8 +586,9 @@
       await S.set(k.rules, JSON.stringify(arr, null, 2));
     },
     async context(tid, val) {
-      if (typeof val === "undefined") return S.get(k.byThread(tid, "context_text"), "");
-      return S.set(k.byThread(tid, "context_text"), String(val||""));
+      const key = k.byThread(tid, "context_text");
+      if (typeof val === "undefined") return S.get(key, "");
+      return S.set(key, String(val || ""));
     }
   };
 })();
