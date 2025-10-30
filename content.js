@@ -1,8 +1,10 @@
 // Messenger Chatbot — SOLO REGLAS — Responder SOLO a mensajes ENTRANTES reales
-// FIX 2025-10-29:
-// - Dirección 'in/out' más robusta (detecta "Has enviado / You sent" como OUT).
-// - Cooldown por hilo tras enviar para ignorar mutaciones del DOM.
-// - Mantiene anti-duplicados por hash de entrante y de respuesta.
+// FIX 2025-10-29 (v2):
+// - Si llega un mensaje NUEVO en otro chat, al abrir el "no leído" se responde de inmediato.
+// - No marcamos como atendido (baseline) cuando el hilo se abrió por ser "no leído".
+// - Dirección 'in/out' robusta (detecta "Has enviado / You sent" como OUT).
+// - Cooldown post-envío para ignorar mutaciones del DOM.
+// - Anti-duplicados por hash de entrante y de respuesta.
 
 (() => {
   "use strict";
@@ -14,7 +16,7 @@
     CLICK_COOLDOWN_MS: 8000,       // anti-spam al abrir no leídos
     REPLY_COOLDOWN_MS: 12000,      // mínimo entre respuestas por hilo
     OPEN_UNREAD: true,             // abrir no leídos (no envía por sí mismo)
-    THREAD_LOAD_SILENCE_MS: 1500,  // silencio tras cambiar de chat
+    THREAD_LOAD_SILENCE_MS: 600,   // silencio tras cambiar de chat
     SEND_COOLDOWN_MS: 1200,        // silencio tras enviar (mutaciones post-envío)
     DEFAULT_FALLBACK: "",
     DEBUG: true
@@ -82,6 +84,9 @@
   const newIncomingFlag = new Map();          // tid -> boolean (solo procesa si true)
   const lastBubbleHashMem = new Map();        // tid -> hash local (mutaciones)
   const sendCooldownUntil = new Map();        // tid -> ts (ignorar mutaciones post-envío)
+
+  // *** NUEVO: si abrimos un hilo porque era "no leído", lo marcamos aquí para forzar respuesta ***
+  let pendingAutoOpenTid = null;
 
   /* ====================== HELPERS DOM ====================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
@@ -232,14 +237,13 @@
                       .replace(/[ \t]+/g, " ")
                       .trim();
 
-      // omitir si no hay texto útil
       if (!text) continue;
 
       // ATRIBUTOS
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
       const aria   = (b.getAttribute("aria-label") || "").toLowerCase();
 
-      // Fuerza OUT si hay indicios de recibo/eco ("Has enviado", "You sent", etc.)
+      // Fuerza OUT si hay indicios de eco ("Has enviado", "You sent", etc.)
       if (isOutHint(text) || isOutHint(aria)) {
         const hash = djb2(`out|${text}|#${count}`);
         return { text, dir: "out", count, hash };
@@ -502,15 +506,35 @@
   };
 
   const onThreadChanged = async (newTid) => {
-    currentTid = newTid || "unknown";
-    newIncomingFlag.set(currentTid, false);
+    const tid = newTid || "unknown";
+    currentTid = tid;
+    newIncomingFlag.set(tid, false);
     threadSilenceUntil = now() + CFG.THREAD_LOAD_SILENCE_MS;
 
     const base = getBaselineHash();
-    lastBubbleHashMem.set(currentTid, base);
-    await S.set(baselineHashKey(currentTid), base);
-    await S.set(lastIncomingHashKey(currentTid), base);
-    log("[thread] cambiado a", currentTid, " baseline:", base);
+
+    if (pendingAutoOpenTid && pendingAutoOpenTid === tid) {
+      // *** Caso: abrimos este hilo porque estaba "no leído" ***
+      // No marcamos baseline como "atendido" ni memoria local,
+      // y forzamos proceso tras el silencio de carga.
+      await S.set(baselineHashKey(tid), base);
+
+      setTimeout(() => {
+        // Forzamos que el último bubble entrante se procese
+        newIncomingFlag.set(tid, true);
+        // Importante: no tocar lastBubbleHashMem para que no bloquee
+        maybeReplyByRules(tid);
+      }, CFG.THREAD_LOAD_SILENCE_MS + 50);
+
+      log("[thread] abierto por NO LEÍDO → procesar último entrante", tid, " baseline:", base);
+      pendingAutoOpenTid = null;
+    } else {
+      // Cambio normal (manual o por navegación): snapshot y lo marcamos como atendido
+      lastBubbleHashMem.set(tid, base);
+      await S.set(baselineHashKey(tid), base);
+      await S.set(lastIncomingHashKey(tid), base);
+      log("[thread] cambiado a", tid, " baseline:", base);
+    }
   };
 
   const watchURL = () => {
@@ -538,8 +562,11 @@
     if (CFG.OPEN_UNREAD && now() - lastClickAt > CFG.CLICK_COOLDOWN_MS) {
       const links = findUnread();
       if (links.length) {
+        // Elegimos un no leído distinto al actual si es posible
         const candidate = links.find(a => getThreadIdFromHref(a.getAttribute("href")) !== currentTid) || links[0];
         if (candidate) {
+          const hrefTid = getThreadIdFromHref(candidate.getAttribute("href"));
+          pendingAutoOpenTid = hrefTid || null; // *** clave: marcar que lo abrimos por "no leído"
           lastClickAt = now();
           realClick(candidate);
           setTimeout(() => { clickUnreadDividerIfAny(); }, 200);
