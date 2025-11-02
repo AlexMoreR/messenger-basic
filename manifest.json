@@ -2,17 +2,17 @@
   "manifest_version": 3,
   "name": "NETMAGI (Basic)",
   "version": "1.0.0",
-  "description": "Botón flotante con respuestas rápidas para Messenger (pega texto, no envía automático).",
-  "permissions": ["scripting"],
+  "description": "Aplicacion de automatizacion",
+  "permissions": ["scripting", "storage"],
   "host_permissions": [
-    "https://www.messenger.com/*",
-    "https://www.facebook.com/*"
+    "*://*.messenger.com/*",
+    "*://*.facebook.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://www.messenger.com/*",
-        "https://www.facebook.com/messages/*"
+        "*://*.messenger.com/*",
+        "*://*.facebook.com/messages/*"
       ],
       "js": ["ui.js", "content.js"],
       "run_at": "document_idle"
