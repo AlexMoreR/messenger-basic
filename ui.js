@@ -1,79 +1,499 @@
-// ui.js — Utilidades de UI para VZ-Bot
+// ui.js — Panel visual de reglas (simple, sin flags visibles) para VZ-Bot
+// - Sin dependencias externas
+// - Guarda UI propia en __vz_rules_ui y publica reglas compiladas en __vz_rules_json
+// - Compatible con content.js existente (usa window.VZUI.injectTopBar / openRulesModal)
+
 (() => {
   "use strict";
 
+  /* =========================
+     Helpers
+  ========================== */
   const Q  = (sel, r=document) => r.querySelector(sel);
+  const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
+  const cssOnce = (id, css) => {
+    if (Q("#"+id)) return;
+    const s = document.createElement("style");
+    s.id = id; s.textContent = css; document.documentElement.appendChild(s);
+  };
+  const S = {
+    async get(key, fallback=null){
+      try { if (chrome?.storage?.local){ const o = await chrome.storage.local.get(key); return o?.[key] ?? fallback; } } catch {}
+      try { const raw = localStorage.getItem(key); return raw===null?fallback:JSON.parse(raw); } catch { return fallback; }
+    },
+    async set(key, val){
+      try { if (chrome?.storage?.local){ await chrome.storage.local.set({[key]:val}); return; } } catch {}
+      localStorage.setItem(key, typeof val==="string" ? val : JSON.stringify(val));
+    }
+  };
+  const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const now = () => Date.now();
 
-  function openModal({ title, initialValue, mono=false, onSave }) {
-    const id = "vz-modal-wrap";
-    if (Q("#"+id)) Q("#"+id).remove();
+  /* =========================
+     Estilos
+  ========================== */
+  cssOnce("vz-ui-simple-css", `
+  #vz-topbar{all:initial}
+  .vz-wrap{position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.45); backdrop-filter: blur(2px);}
+  .vz-dialog{width:min(1000px,96vw); max-height:92vh; background:#0f0f12; color:#fff; border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 24px 80px rgba(0,0,0,.35); display:flex; flex-direction:column;}
+  .vz-hd{display:flex; gap:10px; align-items:center; padding:12px 14px; border-bottom:1px solid rgba(255,255,255,.08);}
+  .vz-ttl{font:600 15px/1.2 system-ui, -apple-system, Segoe UI, Roboto}
+  .vz-sp{flex:1}
+  .vz-btn{background:#1f2937; border:none; color:#fff; border-radius:10px; padding:8px 10px; font:500 13px system-ui; cursor:pointer}
+  .vz-btn:hover{filter:brightness(1.1)}
+  .vz-btn.pr{background:#22c55e}
+  .vz-btn.ghost{background:#374151}
+  .vz-btn.icon{padding:6px; width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center; border-radius:8px}
+  .vz-btn.icon svg{width:16px; height:16px; display:block}
+  .vz-icon{fill:#fff; opacity:.9}
+  .vz-icon.warn{fill:#fff}
+  .vz-bd{display:grid; grid-template-columns:280px 1fr; gap:0; min-height:0}
+  .vz-colL{border-right:1px solid rgba(255,255,255,.06); padding:12px; display:flex; flex-direction:column; gap:10px; min-height:0}
+  .vz-colR{padding:12px; min-height:0; display:flex; flex-direction:column; gap:10px}
+  .vz-field{display:flex; flex-direction:column; gap:6px}
+  .vz-label{font:600 12px system-ui; opacity:.9}
+  .vz-input,.vz-select,.vz-textarea{background:#17171b; border:1px solid rgba(255,255,255,.12); color:#fff; border-radius:10px; padding:8px 10px; font:13px system-ui; outline:none}
+  .vz-input:focus,.vz-select:focus,.vz-textarea:focus{border-color:#7c3aed}
+  .vz-textarea{min-height:90px; resize:vertical}
+  .vz-list{display:flex; flex-direction:column; gap:10px; overflow:auto; min-height:0}
+  .vz-card{background:#121216; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:10px; display:flex; gap:10px}
+  .vz-cardTitle{font:600 12px system-ui; opacity:.8}
+  .vz-row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  .vz-templateRow{display:flex; gap:6px; flex-wrap:wrap}
+  .vz-reorder{display:flex; gap:4px}
+  .vz-note{font:12px system-ui; opacity:.75}
+  .vz-tester{background:#0d0d11; border:1px dashed rgba(255,255,255,.12); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:8px}
+  .vz-hit{border-left:3px solid #22c55e; padding-left:8px}
+  .vz-nohit{border-left:3px solid #ef4444; padding-left:8px}
+  .vz-chip{display:inline-flex; gap:6px; align-items:center; background:#1f2937; border:1px solid rgba(255,255,255,.08); color:#fff; padding:6px 10px; border-radius:999px; font:12px system-ui; cursor:pointer}
+  .vz-newpulse{outline:2px solid #22c55e; box-shadow:0 0 0 0 rgba(34,197,94,.6); animation:vzPulse 1.1s ease-out 2}
+  @keyframes vzPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.6)}100%{box-shadow:0 0 0 14px rgba(34,197,94,0)}}
+  `);
 
-    const overlay = document.createElement("div");
-    overlay.id = id;
-    Object.assign(overlay.style, {
-      position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", backdropFilter: "blur(2px)",
-      zIndex: 2147483647, display: "flex", alignItems: "center", justifyContent: "center"
-    });
+  /* =========================
+     Estado y conversión
+  ========================== */
+  const UI_KEY = "__vz_rules_ui";
 
-    const dialog = document.createElement("div");
-    Object.assign(dialog.style, {
-      width: "min(96vw, 680px)", background: "rgba(24,24,27,.96)", color: "#fff",
-      borderRadius: "14px", border: "1px solid rgba(255,255,255,.08)",
-      boxShadow: "0 24px 80px rgba(0,0,0,.35)", padding: "16px",
-      font: "14px/1.35 system-ui, -apple-system, Segoe UI, Roboto"
-    });
+  // Modelo UI por regla
+  // { enabled, mode, text, rawRegex, wholeWord, reply }
+  let uiRules = [];
+  let filterText = "";
+  let panelOpen = false;
 
-    const h = document.createElement("div");
-    h.textContent = title;
-    Object.assign(h.style, { fontWeight: 700, fontSize: "16px", marginBottom: "8px" });
+  const templates = [
+    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"^(hola|buen[oa]s|saludos)\\b", wholeWord:false, text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
+    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"precio|valor|cu[aá]nto cuesta|costo", wholeWord:false, text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
+    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",   rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", wholeWord:false, text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
+    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"env[ií]o|entrega|domicilio", wholeWord:false, text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
+    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", wholeWord:false, text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
+  ];
 
-    const ta = document.createElement("textarea");
-    ta.value = initialValue || "";
-    Object.assign(ta.style, {
-      width: "100%", minHeight: "260px", borderRadius: "10px",
-      border: "1px solid rgba(255,255,255,.15)",
-      background: "rgba(39,39,42,.92)", color: "#fff",
-      padding: "10px 12px", outline: "none", resize: "vertical",
-      fontFamily: mono ? "ui-monospace, Menlo, Consolas, monospace" : "inherit",
-      fontSize: mono ? "13px" : "14px"
-    });
-
-    const row = document.createElement("div");
-    Object.assign(row.style, { display: "flex", gap: "8px", marginTop: "12px", justifyContent: "flex-end" });
-
-    const mkBtn = (txt, bg, bold=false) => {
-      const b = document.createElement("button");
-      b.textContent = txt;
-      Object.assign(b.style, {
-        background: bg, color: "#fff", border: "none",
-        borderRadius: "10px", padding: "8px 12px", cursor: "pointer",
-        fontWeight: bold ? 700 : 500
-      });
-      return b;
-    };
-
-    const cancel = mkBtn("Cancelar", "#6b7280");
-    const save = mkBtn("Guardar", "#22c55e", true);
-
-    cancel.onclick = () => overlay.remove();
-    save.onclick = async () => {
-      try { await onSave(ta.value); overlay.remove(); } catch (e) { alert(e?.message || e); }
-    };
-
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
-    overlay.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") { e.preventDefault(); overlay.remove(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); save.click(); }
-    });
-
-    dialog.append(h, ta, row);
-    row.append(cancel, save);
-    overlay.append(dialog);
-    document.documentElement.append(overlay);
-    setTimeout(() => ta.focus(), 0);
+  // Exporta al motor: SIEMPRE insensible a mayúsculas (flag i) sin mostrarlo en UI
+  function compileForEngine(list){
+    const out = [];
+    for (const r of list) {
+      if (!r.enabled) continue;
+      let pattern = "";
+      if (r.mode === "Regex") {
+        pattern = String(r.rawRegex || "").trim();
+        if (!pattern) continue;
+      } else {
+        const esc = escapeRegExp(String(r.text||""));
+        if (!esc) continue;
+        switch(r.mode){
+          case "Contiene":   pattern = r.wholeWord ? `\\b${esc}\\b` : esc; break;
+          case "Empieza":    pattern = `^${esc}`; break;
+          case "Termina":    pattern = `${esc}$`; break;
+          case "Igual a":    pattern = `^${esc}$`; break;
+          default:           pattern = esc;
+        }
+      }
+      const flags = "i"; // ← Siempre case-insensitive (simplificado)
+      out.push({ pattern, flags, reply: String(r.reply||"") });
+    }
+    return out;
   }
 
-  function injectTopBar({ getEnabled, setEnabled, onOpenRules }) {
+  // Intento de inflar desde compilado previo (ignoramos flags avanzadas)
+  function inflateFromCompiled(compiled){
+    const arr = [];
+    for (const r of (compiled || [])) {
+      const patt = String(r.pattern||"");
+      let mode = "Regex";
+      let text = "";
+      let rawRegex = patt;
+      let wholeWord = false;
+
+      if (/^\^.*\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1,-1))) {
+        mode = "Igual a"; text = patt.slice(1,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      }
+      else if (/^\^.+/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1))) {
+        mode = "Empieza"; text = patt.slice(1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      }
+      else if (/.+\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(0,-1))) {
+        mode = "Termina"; text = patt.slice(0,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      }
+      else if (/^\\b.*\\b$/.test(patt) && !/[.*+?()|[\]\\]^$]/.test(patt.replace(/^\\b|\\b$/g,""))) {
+        mode = "Contiene"; wholeWord = true;
+        text = patt.replace(/^\\b|\\b$/g,"").replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      }
+      else if (!/[.*+?()|[\]\\^$]/.test(patt)) {
+        mode = "Contiene"; text = patt;
+      }
+
+      arr.push({
+        enabled: true,
+        mode, text, rawRegex,
+        wholeWord,
+        reply: String(r.reply||"")
+      });
+    }
+    return arr;
+  }
+
+  /* =========================
+     Panel UI
+  ========================== */
+  function openRulesPanel({ loadRules, saveRules }){
+    if (panelOpen) return;
+    panelOpen = true;
+
+    const id = "vz-panel-wrap";
+    Q("#"+id)?.remove();
+
+    const wrap = document.createElement("div");
+    wrap.className = "vz-wrap"; wrap.id = id;
+
+    const dlg = document.createElement("div");
+    dlg.className = "vz-dialog";
+
+    /* Header */
+    const hd  = document.createElement("div"); hd.className = "vz-hd";
+    const ttl = document.createElement("div"); ttl.className = "vz-ttl"; ttl.textContent = "Reglas del chatbot (prioridad de arriba hacia abajo)";
+    const sp  = document.createElement("div"); sp.className = "vz-sp";
+
+    const btnClose = mkBtn("Cerrar", "ghost");
+    btnClose.onclick = () => { wrap.remove(); panelOpen = false; };
+
+    const btnExport = mkBtn("Exportar JSON", "ghost");
+    btnExport.onclick = async () => {
+      const compiled = compileForEngine(uiRules);
+      const blob = new Blob([JSON.stringify(compiled, null, 2)], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `vz-rules-${Date.now()}.json`;
+      a.click(); setTimeout(()=>URL.revokeObjectURL(url), 5000);
+    };
+
+    const btnPublish = mkBtn("Guardar y activar", "pr");
+    btnPublish.title = "Publica las reglas al motor (content.js) respetando el orden y solo las activas";
+    btnPublish.onclick = async () => {
+      const compiled = compileForEngine(uiRules);
+      await saveRules(JSON.stringify(compiled, null, 2));
+      await S.set(UI_KEY, uiRules);
+      flash(btnPublish, "Guardado");
+    };
+
+    hd.append(ttl, sp, btnExport, btnPublish, btnClose);
+
+    /* Body (2 columnas) */
+    const bd  = document.createElement("div"); bd.className = "vz-bd";
+    const L   = document.createElement("div"); L.className   = "vz-colL";
+    const R   = document.createElement("div"); R.className   = "vz-colR";
+
+    // Izquierda: buscar + plantillas + tester
+    const searchField = field("Buscar", input({placeholder:"filtra por texto o respuesta…"}));
+    const search = searchField.querySelector("input");
+    search.oninput = () => { filterText = String(search.value||"").toLowerCase().trim(); renderList(); };
+
+    const addRow = document.createElement("div"); addRow.className = "vz-templateRow";
+    const btnAddEmpty = mkBtn("+ Nueva regla");
+    btnAddEmpty.onclick = () => addRule();
+
+    addRow.append(btnAddEmpty);
+    for (const t of templates) {
+      const b = mkBtn(t.label, "ghost");
+      b.onclick = () => addRule(t.prefill);
+      addRow.append(b);
+    }
+
+    const tester = testerBox();
+
+    L.append(searchField, addRow, tester);
+
+    // Derecha: lista
+    const listWrap = document.createElement("div"); listWrap.className = "vz-list";
+    R.append(listWrap);
+
+    bd.append(L, R);
+    dlg.append(hd, bd);
+    wrap.append(dlg);
+    document.documentElement.append(wrap);
+
+    // Cerrar por fondo / ESC
+    wrap.addEventListener("click", (e)=>{ if (e.target === wrap){ wrap.remove(); panelOpen=false; }});
+    wrap.addEventListener("keydown", (e)=>{ if (e.key==="Escape"){ e.preventDefault(); wrap.remove(); panelOpen=false; }});
+
+    // Carga
+    (async () => {
+      const uiSaved = await S.get(UI_KEY, null);
+      if (Array.isArray(uiSaved) && uiSaved.length) {
+        uiRules = uiSaved;
+      } else {
+        try {
+          const compiled = JSON.parse(await loadRules());
+          uiRules = inflateFromCompiled(compiled);
+        } catch {
+          uiRules = [];
+        }
+        await S.set(UI_KEY, uiRules);
+      }
+      renderList();
+    })();
+
+    /* ====== funciones internas ====== */
+    function renderList(){
+      listWrap.innerHTML = "";
+      const term = filterText;
+      let view = uiRules.map((it, idx) => ({...it, _idx:idx}));
+      if (term) {
+        view = view.filter(r =>
+          String(r.text||"").toLowerCase().includes(term) ||
+          String(r.rawRegex||"").toLowerCase().includes(term) ||
+          String(r.reply||"").toLowerCase().includes(term)
+        );
+      }
+      if (!view.length){
+        const empty = document.createElement("div");
+        empty.className = "vz-note"; empty.textContent = "No hay reglas (o el filtro no coincide).";
+        listWrap.append(empty);
+        return;
+      }
+      for (const r of view) listWrap.append(ruleCard(r));
+    }
+
+    function ruleCard(r){
+      const i = r._idx;
+      const card = document.createElement("div"); card.className = "vz-card";
+
+      // Col izquierda: ON/OFF + prioridad + mover
+      const left = document.createElement("div");
+      left.style.display="flex"; left.style.flexDirection="column"; left.style.gap="8px"; left.style.alignItems="center"; left.style.minWidth="70px";
+
+      const enChk = document.createElement("input"); enChk.type="checkbox"; enChk.checked = !!uiRules[i].enabled;
+      enChk.onchange = () => { uiRules[i].enabled = enChk.checked; saveDraft(); };
+
+      const prio = document.createElement("div"); prio.textContent = `#${i+1}`; prio.style.opacity=.7; prio.style.font="600 12px system-ui";
+
+      const reorder = document.createElement("div"); reorder.className="vz-reorder";
+      const up = mkIconBtn(svgChevronUp(), "Subir prioridad", "#374151");
+      const down = mkIconBtn(svgChevronDown(), "Bajar prioridad", "#374151");
+      up.onclick = () => { if (i>0){ const t=uiRules[i]; uiRules.splice(i,1); uiRules.splice(i-1,0,t); saveDraft(); renderList(); } };
+      down.onclick = () => { if (i<uiRules.length-1){ const t=uiRules[i]; uiRules.splice(i,1); uiRules.splice(i+1,0,t); saveDraft(); renderList(); } };
+
+      reorder.append(up,down);
+      left.append(enChk, prio, reorder);
+
+      // Centro: config
+      const center = document.createElement("div"); center.style.flex="1"; center.style.display="flex"; center.style.flexDirection="column"; center.style.gap="8px";
+
+      const title = document.createElement("div"); title.className="vz-cardTitle";
+      title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`;
+
+      const row1 = document.createElement("div"); row1.className="vz-row";
+
+      const mode = select(["Contiene","Igual a","Empieza","Termina","Regex"], uiRules[i].mode || "Contiene");
+      mode.onchange = () => { uiRules[i].mode = mode.value; title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`; saveDraft(); syncInputs(); };
+
+      const txt = input({placeholder:"texto a buscar…"}); txt.value = uiRules[i].text || "";
+      txt.oninput = () => { uiRules[i].text = txt.value; saveDraft(); };
+
+      const rx = input({placeholder:"expresión regular…"}); rx.value = uiRules[i].rawRegex || "";
+      rx.oninput = () => { uiRules[i].rawRegex = rx.value; saveDraft(); };
+
+      // Solo dejamos “Palabra completa” (sin i / sin flags extra)
+      const ww = chip("Palabra completa", !!uiRules[i].wholeWord, (v)=>{ uiRules[i].wholeWord = v; saveDraft(); });
+
+      const replyField = field("Respuesta", textarea()); replyField.querySelector("textarea").value = uiRules[i].reply || "";
+      replyField.querySelector("textarea").oninput = (e)=>{ uiRules[i].reply = e.target.value; saveDraft(); };
+
+      row1.append(label("Modo"), mode, spacer(), label("Texto/Regex"), txt, rx);
+      center.append(title, row1, ww, replyField);
+
+      // Derecha: acciones (iconos)
+      const right = document.createElement("div"); right.style.display="flex"; right.style.gap="6px"; right.style.alignItems="center";
+
+      const dup = mkIconBtn(svgDuplicate(), "Duplicar", "#374151");
+      dup.onclick = () => { const c = structuredClone(uiRules[i]); uiRules.splice(i+1, 0, c); saveDraft(); renderList(); };
+
+      const del = mkIconBtn(svgTrash(), "Eliminar", "#ef4444");
+      del.onclick = () => { if (confirm("¿Eliminar esta regla?")){ uiRules.splice(i,1); saveDraft(); renderList(); } };
+
+      right.append(dup, del);
+      card.append(left, center, right);
+
+      function syncInputs(){
+        if (mode.value === "Regex"){
+          txt.style.display="none"; rx.style.display="";
+          ww.style.opacity = .35; ww.style.pointerEvents="none";
+        } else {
+          txt.style.display=""; rx.style.display="none";
+          ww.style.opacity = 1; ww.style.pointerEvents="auto";
+        }
+      }
+      syncInputs();
+      return card;
+    }
+
+    function addRule(prefill){
+      // Inserta al INICIO (primera prioridad) y limpia filtro para que se vea
+      filterText = ""; const s = Q(".vz-colL input[type='text']"); if (s) s.value = "";
+      const item = prefill ? structuredClone(prefill) : { enabled:true, mode:"Contiene", text:"", wholeWord:false, rawRegex:"", reply:"" };
+      uiRules.unshift(item);
+      renderList();
+      saveDraft();
+      requestAnimationFrame(() => {
+        const first = listWrap?.firstElementChild;
+        if (first){
+          first.classList.add("vz-newpulse");
+          first.scrollIntoView({ behavior:"smooth", block:"nearest" });
+          setTimeout(()=>first.classList.remove("vz-newpulse"), 1400);
+        }
+      });
+    }
+
+    function testerBox(){
+      const box = document.createElement("div"); box.className="vz-tester";
+      const h = document.createElement("div"); h.className="vz-label"; h.textContent="Probador rápido";
+      const inp = input({placeholder:"Escribe un mensaje entrante (simulado) y verás qué regla coincide primero…"});
+      const note = document.createElement("div"); note.className="vz-note"; note.textContent = "La primera coincidencia (arriba) es la que se usa. Ajusta el orden con los chevrons.";
+
+      const out = document.createElement("div"); out.className="vz-note";
+
+      function runTest(){
+        const msg = String(inp.value||"");
+        if (!msg.trim()){ out.textContent=""; return; }
+        const compiled = compileForEngine(uiRules);
+        let matched = null;
+        for (let i=0;i<compiled.length;i++){
+          try{
+            const re = new RegExp(compiled[i].pattern, compiled[i].flags);
+            if (re.test(msg)){ matched = { idx:i, rule:compiled[i] }; break; }
+          }catch{}
+        }
+        if (matched){
+          out.className = "vz-note vz-hit";
+          out.innerHTML = `✔ Coincide la <b>regla #${matched.idx+1}</b>. Respondería:<br><pre style="white-space:pre-wrap;margin:6px 0 0">${escapeHtml(matched.rule.reply)}</pre>`;
+          const card = listWrap.children[matched.idx];
+          if (card) { card.classList.add("vz-newpulse"); setTimeout(()=>card.classList.remove("vz-newpulse"), 1400); card.scrollIntoView({behavior:"smooth", block:"nearest"}); }
+        } else {
+          out.className = "vz-note vz-nohit";
+          out.textContent = "✖ Ninguna regla coincide.";
+        }
+      }
+
+      inp.oninput = runTest;
+      box.append(h, inp, note, out);
+      return box;
+    }
+
+    function saveDraft(){ S.set(UI_KEY, uiRules); }
+
+    /* ---- helpers UI ---- */
+    function mkBtn(label, kind="default"){
+      const b = document.createElement("button");
+      b.className = "vz-btn" + (kind? " " + kind : "");
+      b.textContent = label;
+      return b;
+    }
+    function mkIconBtn(svgNode, ariaLabel, bg){
+      const b = document.createElement("button");
+      b.className = "vz-btn icon";
+      b.style.background = bg || "#374151";
+      b.setAttribute("title", ariaLabel);
+      b.setAttribute("aria-label", ariaLabel);
+      b.append(svgNode);
+      return b;
+    }
+    function svgDuplicate(){
+      const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+      svg.setAttribute("viewBox","0 0 24 24");
+      svg.innerHTML = `
+        <path class="vz-icon" d="M8 7a3 3 0 0 1 3-3h7a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3h-7a3 3 0 0 1-3-3V7z"/>
+        <path class="vz-icon" d="M3 10a3 3 0 0 1 3-3h1v7a5 5 0 0 0 5 5h7v1a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-10z" opacity=".55"/>
+      `;
+      return svg;
+    }
+    function svgTrash(){
+      const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+      svg.setAttribute("viewBox","0 0 24 24");
+      svg.innerHTML = `
+        <path class="vz-icon warn" d="M9 3h6a1 1 0 0 1 1 1v1h4v2H4V5h4V4a1 1 0 0 1 1-1z"/>
+        <path class="vz-icon warn" d="M6 8h12l-1 11a3 3 0 0 1-3 3H10a3 3 0 0 1-3-3L6 8zm4 3v7h2v-7h-2zm4 0v7h2v-7h-2z" opacity=".95"/>
+      `;
+      return svg;
+    }
+    function svgChevronUp(){
+      const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+      svg.setAttribute("viewBox","0 0 24 24");
+      svg.innerHTML = `<path class="vz-icon" d="M7.41 14.59 12 10l4.59 4.59L18 13.17 12 7l-6 6z"/>`;
+      return svg;
+    }
+    function svgChevronDown(){
+      const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+      svg.setAttribute("viewBox","0 0 24 24");
+      svg.innerHTML = `<path class="vz-icon" d="M7.41 8.59 12 13l4.59-4.41L18 10.83 12 17 6 10.83z"/>`;
+      return svg;
+    }
+    function input(attrs={}){
+      const i = document.createElement("input");
+      i.className = "vz-input";
+      Object.assign(i, attrs);
+      if (attrs.style) i.setAttribute("style", attrs.style);
+      return i;
+    }
+    function textarea(){
+      const t = document.createElement("textarea");
+      t.className = "vz-textarea";
+      return t;
+    }
+    function select(options, value){
+      const s = document.createElement("select");
+      s.className = "vz-select";
+      for (const o of options){
+        const opt = document.createElement("option"); opt.value = o; opt.textContent = o; s.append(opt);
+      }
+      s.value = value;
+      return s;
+    }
+    function field(labelText, el){
+      const f = document.createElement("div"); f.className="vz-field";
+      const l = document.createElement("div"); l.className="vz-label"; l.textContent = labelText;
+      f.append(l, el); return f;
+    }
+    function label(txt){
+      const s = document.createElement("span"); s.className="vz-label"; s.textContent = txt; return s;
+    }
+    function spacer(){ const s = document.createElement("span"); s.style.flex="0 0 8px"; return s; }
+    function chip(text, val, onChange){
+      const w = document.createElement("label"); w.className="vz-chip"; w.title = "Coincidir palabra completa (modos no-Regex)";
+      const c = document.createElement("input"); c.type = "checkbox"; c.checked = !!val; c.style.marginRight="6px";
+      const t = document.createElement("span"); t.textContent = text;
+      w.append(c,t); c.onchange = ()=> onChange?.(c.checked); return w;
+    }
+    function flash(btn, txt){
+      const old = btn.textContent; btn.textContent = "✓ " + (txt||"OK"); btn.disabled = true;
+      setTimeout(()=>{ btn.textContent = old; btn.disabled = false; }, 900);
+    }
+    function escapeHtml(s){
+      return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+  }
+
+  /* =========================
+     API pública para content.js
+  ========================== */
+  function injectTopBar({ getEnabled, setEnabled, onOpenRules }){
     if (Q("#vz-topbar")) return;
 
     const wrap = document.createElement("div");
@@ -118,7 +538,7 @@
       btnToggle.style.background = next ? "#22c55e" : "#525252";
     };
 
-    const btnRules = mkBtn("Editar reglas", "#7c3aed");
+    const btnRules = mkBtn("Reglas", "#7c3aed");
     btnRules.onclick = () => onOpenRules?.();
 
     bar.append(status, btnToggle, btnRules);
@@ -126,25 +546,9 @@
     document.documentElement.append(wrap);
   }
 
-  async function openRulesModal({ loadRules, saveRules }) {
-    let raw = await loadRules();
-    if (!raw) raw = "[]";
-    openModal({
-      title: "Editar reglas del chatbot (JSON: [{ pattern, flags?, reply }])",
-      initialValue: raw,
-      mono: true,
-      onSave: async (val) => {
-        const parsed = JSON.parse(val);
-        if (!Array.isArray(parsed)) throw new Error("El JSON debe ser un array.");
-        parsed.forEach(o => {
-          if (typeof o.pattern !== "string" || typeof o.reply !== "string") {
-            throw new Error("Cada regla requiere 'pattern' (string) y 'reply' (string).");
-          }
-        });
-        await saveRules(JSON.stringify(parsed, null, 2));
-      }
-    });
+  async function openRulesModal({ loadRules, saveRules }){
+    openRulesPanel({ loadRules, saveRules });
   }
 
-  window.VZUI = { injectTopBar, openModal, openRulesModal };
+  window.VZUI = { injectTopBar, openRulesModal };
 })();
