@@ -79,6 +79,10 @@
   // Unread watcher (delta): record de “no leído” previo para no re-encolar
   const unreadSeen = new Set();
 
+  // 🆕 Flag global: hasta cuándo consideramos que el operador está tecleando
+  let operatorTypingUntil = 0;
+  let lastComposerEl = null;
+
   /* ===== Messenger helpers ===== */
   const MSG_ROW_SELECTORS = [
     '[role="grid"] [role="row"]',
@@ -144,8 +148,21 @@
     ].join(",");
     const boxes = QA(sel).filter(isVisible);
     if (!boxes.length) return null;
-    return boxes.reduce((a,b)=> (a.getBoundingClientRect().top > b.getBoundingClientRect().top ? a : b));
+    const composer = boxes.reduce((a,b)=> (a.getBoundingClientRect().top > b.getBoundingClientRect().top ? a : b));
+
+    // 🆕 Hook para detectar que el operador está tecleando
+    if (composer && composer !== lastComposerEl) {
+      lastComposerEl = composer;
+      try {
+        composer.addEventListener("keydown", () => {
+          operatorTypingUntil = now() + 5000; // 5s de margen desde la última tecla
+        }, { capture: true });
+      } catch {}
+    }
+
+    return composer;
   };
+
   const emitEnter = (el) => {
     const base = { bubbles:true, cancelable:true, key:"Enter", code:"Enter", which:13, keyCode:13 };
     el.dispatchEvent(new KeyboardEvent("keydown", base));
@@ -178,40 +195,61 @@
   const getLastBubbleInfo = () => {
     const bubbles = QA(MSG_ROW_SELECTORS.join(","), document.body).filter(isVisible);
     const count = bubbles.length;
-    for (let i=count-1; i>=0; i--) {
+    for (let i = count - 1; i >= 0; i--) {
       const b = bubbles[i];
       if (/\b(reaction|sticker|emoji|system)\b/i.test(b.getAttribute("data-testid") || "")) continue;
-      const nodes = QA('div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p', b);
-      let text = nodes.map(n => (n.innerText || n.textContent || "").trim()).filter(Boolean).join("\n")
-        .replace(/\s+\n/g,"\n").replace(/\n\s+/g,"\n").replace(/[ \t]+/g," ").trim();
+
+      const nodes = QA(
+        'div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p',
+        b
+      );
+      let text = nodes
+        .map(n => (n.innerText || n.textContent || "").trim())
+        .filter(Boolean)
+        .join("\n")
+        .replace(/\s+\n/g, "\n")
+        .replace(/\n\s+/g, "\n")
+        .replace(/[ \t]+/g, " ")
+        .trim();
+
       if (!text) continue;
 
-      const testid=(b.getAttribute("data-testid")||"").toLowerCase();
-      const aria=(b.getAttribute("aria-label")||"").toLowerCase();
-      const msgId=b.getAttribute("data-message-id") || b.id || i;
+      const testid = (b.getAttribute("data-testid") || "").toLowerCase();
+      const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+      const msgId = b.getAttribute("data-message-id") || b.id || i;
 
+      // 1) pistas fuertes de mensaje propio (out)
       if (isOutHint(text) || isOutHint(aria)) {
-        const hash=djb2(`out|${text}|#${count}|${msgId}`);
-        return { text, dir:"out", count, hash };
+        const hash = djb2(`out|${text}|#${count}|${msgId}`);
+        return { text, dir: "out", count, hash };
       }
 
-      let dir=null;
-      if (/incoming/.test(testid)) dir="in";
-      else if (/outgoing/.test(testid)) dir="out";
-      if (!dir){
-        if (/\b(you|tú|vos|usted)\b/.test(aria)) dir="out";
-        else if (aria) dir="in";
+      // 2) testid de la plataforma
+      let dir = null;
+      if (/incoming/.test(testid)) dir = "in";
+      else if (/outgoing/.test(testid)) dir = "out";
+
+      // 3) NO asumir "in" solo por tener aria.
+      //    Solo marcamos "out" si el aria suena claramente a mensaje propio.
+      if (!dir && aria) {
+        if (/(you sent|has enviado|enviaste|mensaje enviado|enviado por ti)/.test(aria)) {
+          dir = "out";
+        }
       }
-      if (!dir){
-        const rect=b.getBoundingClientRect();
-        const mid=(window.innerWidth || document.documentElement.clientWidth)*0.5;
+
+      // 4) fallback geométrico: derecha = out, izquierda = in
+      if (!dir) {
+        const rect = b.getBoundingClientRect();
+        const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
         dir = rect.left > mid ? "out" : "in";
       }
-      const hash=djb2(`${dir}|${text}|#${count}|${msgId}`);
+
+      const hash = djb2(`${dir}|${text}|#${count}|${msgId}`);
       return { text, dir, count, hash };
     }
-    return { text:"", dir:"in", count:0, hash:"0" };
+    return { text: "", dir: "in", count: 0, hash: "0" };
   };
+
 
   /* ===== Reglas ===== */
   const compileRule = (r)=>{ try{ return { re:new RegExp(r.pattern, r.flags||"i"), reply:r.reply }; }catch{ return null; } };
@@ -238,42 +276,66 @@
   const replyForThread = async (tid) => {
     // Cooldown por hilo
     const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
-    if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) return { done:false, wait: CFG.REPLY_COOLDOWN_MS - (now()-lastAt) };
+    if (now() - lastAt < CFG.REPLY_COOLDOWN_MS) {
+      return { done: false, wait: CFG.REPLY_COOLDOWN_MS - (now() - lastAt) };
+    }
 
     // Asegura estar en el hilo objetivo
     if ((getCurrentThreadIdFromURL() || "unknown") !== tid) {
       let tries = 0;
       while (tries < CFG.MAX_OPEN_TRIES) {
         const ok = openThreadById(tid);
-        if (!ok) return { done:false, wait: CFG.OPEN_RETRY_MS };
+        if (!ok) return { done: false, wait: CFG.OPEN_RETRY_MS };
         await sleep(CFG.OPEN_RETRY_MS);
         if ((getCurrentThreadIdFromURL() || "unknown") === tid) break;
         tries++;
       }
-      return { done:false, wait: CFG.THREAD_LOAD_SILENCE_MS + 80 };
+      return { done: false, wait: CFG.THREAD_LOAD_SILENCE_MS + 80 };
     }
 
-    if (now() < threadSilenceUntil) return { done:false, wait: threadSilenceUntil - now() };
-    if (now() < (sendCooldownUntil.get(tid) || 0)) return { done:false, wait: (sendCooldownUntil.get(tid)||0) - now() };
+    if (now() < threadSilenceUntil) return { done: false, wait: threadSilenceUntil - now() };
+    if (now() < (sendCooldownUntil.get(tid) || 0)) {
+      return { done: false, wait: (sendCooldownUntil.get(tid) || 0) - now() };
+    }
 
     // Tomar último IN visible
     const { text, dir, hash } = getLastBubbleInfo();
-    if (!text || dir !== "in" || isLikelySystem(text)) return { done:false, wait: 300 };
+    if (!text || dir !== "in" || isLikelySystem(text)) {
+      return { done: false, wait: 300 };
+    }
 
     // ¿ya atendido?
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
-    if (String(lastIn) === String(hash)) return { done:true };
+    if (String(lastIn) === String(hash)) return { done: true };
+
+    // 🆕 Si el operador ha estado tecleando hace poco, NO auto-responder
+    if (now() < operatorTypingUntil) {
+      await S.set(lastIncomingHashKey(tid), hash);
+      log("[reply] operador escribiendo (flag keydown), no auto-responder", tid);
+      return { done: true };
+    }
 
     // Reglas
     let reply = null;
-    for (const { re, reply: rep } of compiledRules) { if (re.test(text)) { reply = rep; break; } }
+    for (const { re, reply: rep } of compiledRules) {
+      if (re.test(text)) {
+        reply = rep;
+        break;
+      }
+    }
     if (!reply && CFG.DEFAULT_FALLBACK) reply = CFG.DEFAULT_FALLBACK;
 
-    if (!reply) { await S.set(lastIncomingHashKey(tid), hash); return { done:true }; }
+    if (!reply) {
+      await S.set(lastIncomingHashKey(tid), hash);
+      return { done: true };
+    }
 
     const lastSent = await S.get(lastSentHashKey(tid), "");
     const thisHash = djb2(reply);
-    if (String(lastSent) === String(thisHash)) { await S.set(lastIncomingHashKey(tid), hash); return { done:true }; }
+    if (String(lastSent) === String(thisHash)) {
+      await S.set(lastIncomingHashKey(tid), hash);
+      return { done: true };
+    }
 
     const ok = await sendText(tid, reply);
     if (ok) {
@@ -283,10 +345,11 @@
       await S.set(lastSentHashKey(tid), thisHash);
       lastBubbleHashMem.set(tid, djb2(`out|${reply}|#${ts}`));
       log("[reply] enviado", tid);
-      return { done:true };
+      return { done: true };
     }
-    return { done:false, wait: 400 };
+    return { done: false, wait: 400 };
   };
+
 
   const processQueue = async () => {
     if (processing) return;
@@ -423,7 +486,6 @@
     if (queue.length && !processing) processQueueSoon();
 
     // 4) Anti-roaming: NO abrir no leídos automáticamente
-    // (Si quisieras volver al comportamiento anterior: activar CFG.AUTO_NAVIGATE_ON_UNREAD)
     if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && unreadTids.length) {
       // openThreadById(unreadTids[0]); // ← Desactivado por defecto
     }
