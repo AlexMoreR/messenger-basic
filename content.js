@@ -1,5 +1,5 @@
 // content.js — Bot con COLA FIFO y anti-roaming (solo navega si hay item en cola)
-// v2.5 — 2025-11-02
+// v2.5 — 2025-11-02 (ajustado Marketplace)
 
 (() => {
   "use strict";
@@ -26,7 +26,14 @@
     { pattern: "precio|valor|cu[aá]nto cuesta|costo", flags: "i", reply: "Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" },
     { pattern: "(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", flags: "i", reply: "Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" },
     { pattern: "env[ií]o|entrega|domicilio", flags: "i", reply: "¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" },
-    { pattern: "^(hola|buen[oa]s|saludos)\\b", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." }
+    { pattern: "^(hola|buen[oa]s|saludos)\\b", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." },
+
+    // Regla "cualquiera": cualquier mensaje no vacío
+    {
+      pattern: "[\\s\\S]+",
+      flags: "i",
+      reply: "Gracias por tu mensaje 🙌\n\nEn un momento un asesor revisará tu consulta."
+    }
   ];
 
   /* ===== Utils ===== */
@@ -48,6 +55,8 @@
     const n = normalize(t);
     return n.length < 1 || /\b(visto|missed call|llamada perdida|you reacted|reaccionaste|added|\bagreg[oó]\b|left|sal[ií]o)\b/.test(n);
   };
+
+  const isMarketplacePath = () => location.pathname.startsWith("/marketplace/");
 
   /* ===== Storage ===== */
   const k = { rules: "__vz_rules_json", byThread: (tid, name) => `__vz_thread_${tid}_${name}` };
@@ -79,7 +88,7 @@
   // Unread watcher (delta): record de “no leído” previo para no re-encolar
   const unreadSeen = new Set();
 
-  // 🆕 Flag global: hasta cuándo consideramos que el operador está tecleando
+  // Flag: hasta cuándo consideramos que el operador está tecleando
   let operatorTypingUntil = 0;
   let lastComposerEl = null;
 
@@ -93,8 +102,10 @@
     const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
   };
-  const getThreadLinks = () => QA('a[href^="/e2ee/t/"], a[href^="/t/"]');
-  const getThreadIdFromHref = (href) => href?.match?.(/\/(?:e2ee\/)?t\/([^/?#]+)/)?.[1] || null;
+  const getThreadLinks = () =>
+    QA('a[href^="/e2ee/t/"], a[href^="/t/"], a[href^="/marketplace/t/"]');
+  const getThreadIdFromHref = (href) =>
+    href?.match?.(/\/(?:e2ee\/)?t\/([^/?#]+)/)?.[1] || null;
 
   const looksUnreadRow = (row) => {
     if (!row) return false;
@@ -150,12 +161,12 @@
     if (!boxes.length) return null;
     const composer = boxes.reduce((a,b)=> (a.getBoundingClientRect().top > b.getBoundingClientRect().top ? a : b));
 
-    // 🆕 Hook para detectar que el operador está tecleando
+    // Hook: cuando el operador teclea, marcamos ventana de 5s
     if (composer && composer !== lastComposerEl) {
       lastComposerEl = composer;
       try {
         composer.addEventListener("keydown", () => {
-          operatorTypingUntil = now() + 5000; // 5s de margen desde la última tecla
+          operatorTypingUntil = now() + 5000; // 5s desde la última tecla
         }, { capture: true });
       } catch {}
     }
@@ -229,8 +240,7 @@
       if (/incoming/.test(testid)) dir = "in";
       else if (/outgoing/.test(testid)) dir = "out";
 
-      // 3) NO asumir "in" solo por tener aria.
-      //    Solo marcamos "out" si el aria suena claramente a mensaje propio.
+      // 3) NO asumir "in" solo por tener aria; solo out si suena a enviado por ti
       if (!dir && aria) {
         if (/(you sent|has enviado|enviaste|mensaje enviado|enviado por ti)/.test(aria)) {
           dir = "out";
@@ -257,7 +267,7 @@
 
   /* ===== Per-thread keys ===== */
   const lastReplyAtKey      = (tid)=> k.byThread(tid,"last_reply_at");
-  const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");
+  const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");   // djb2(reply)
   const lastIncomingHashKey = (tid)=> k.byThread(tid,"last_in_hash");
   const baselineHashKey     = (tid)=> k.byThread(tid,"baseline_hash");
 
@@ -298,9 +308,23 @@
       return { done: false, wait: (sendCooldownUntil.get(tid) || 0) - now() };
     }
 
-    // Tomar último IN visible
+    // Tomar último mensaje visible
     const { text, dir, hash } = getLastBubbleInfo();
-    if (!text || dir !== "in" || isLikelySystem(text)) {
+    if (!text || isLikelySystem(text)) {
+      return { done: false, wait: 300 };
+    }
+
+    // Evitar responder a nuestro propio último mensaje (por contenido)
+    const incomingPlain = djb2(text);
+    const lastSentPlain = await S.get(lastSentHashKey(tid), "");
+    if (String(lastSentPlain) === String(incomingPlain)) {
+      // Lo marcamos como gestionado y listo
+      await S.set(lastIncomingHashKey(tid), hash);
+      return { done: true };
+    }
+
+    // En chats normales exigimos dir === "in"; en Marketplace relajamos esa condición
+    if (!isMarketplacePath() && dir !== "in") {
       return { done: false, wait: 300 };
     }
 
@@ -308,10 +332,10 @@
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     if (String(lastIn) === String(hash)) return { done: true };
 
-    // 🆕 Si el operador ha estado tecleando hace poco, NO auto-responder
+    // Operador escribiendo → no auto-responder
     if (now() < operatorTypingUntil) {
       await S.set(lastIncomingHashKey(tid), hash);
-      log("[reply] operador escribiendo (flag keydown), no auto-responder", tid);
+      log("[reply] operador escribiendo, no auto-responder", tid);
       return { done: true };
     }
 
@@ -378,7 +402,15 @@
   const onNewIncomingInActiveChat = async () => {
     const tid = getCurrentThreadIdFromURL() || "unknown";
     const { text, dir, hash } = getLastBubbleInfo();
-    if (!text || dir !== "in" || isLikelySystem(text)) return;
+    if (!text || isLikelySystem(text)) return;
+
+    // Evitar disparar por nuestro propio último mensaje (por contenido)
+    const incomingPlain = djb2(text);
+    const lastSentPlain = await S.get(lastSentHashKey(tid), "");
+    if (String(lastSentPlain) === String(incomingPlain)) return;
+
+    // En chats normales exigimos dir === "in"; en Marketplace somos más flexibles
+    if (!isMarketplacePath() && dir !== "in") return;
 
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     const lastMem = lastBubbleHashMem.get(tid) || "";
@@ -517,7 +549,7 @@
     await onThreadChanged(getCurrentThreadIdFromURL());
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo (anti-roaming, solo navega con cola). Hilo:", currentTid);
+    log("Bot listo (anti-roaming, solo navega con cola). Hilo:", currentTid, "Marketplace:", isMarketplacePath());
   };
 
   if (document.readyState === "loading") {
