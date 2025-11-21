@@ -1,4 +1,4 @@
-// ui.js — Panel visual de reglas (simple, con modo "Cualquiera") para VZ-Bot
+// ui.js — Panel visual de reglas (simple, sin flags visibles) para VZ-Bot
 // - Sin dependencias externas
 // - Guarda UI propia en __vz_rules_ui y publica reglas compiladas en __vz_rules_json
 // - Compatible con content.js existente (usa window.VZUI.injectTopBar / openRulesModal)
@@ -76,54 +76,46 @@
   const UI_KEY = "__vz_rules_ui";
 
   // Modelo UI por regla
-  // { enabled, mode, text, rawRegex, reply }
+  // { enabled, mode, text, rawRegex, wholeWord, reply }
   let uiRules = [];
   let filterText = "";
   let panelOpen = false;
 
   const templates = [
-    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"^(hola|buen[oa]s|saludos)\\b", text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
-    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"precio|valor|cu[aá]nto cuesta|costo", text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
-    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",   rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
-    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"env[ií]o|entrega|domicilio", text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
-    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
-    // Plantilla modo "Cualquiera"
-    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", text:"", rawRegex:"", reply:"Gracias por tu mensaje 🙌\n\nEn un momento un asesor revisará tu consulta." } },
+    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"^(hola|buen[oa]s|saludos)\\b", wholeWord:false, text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
+    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"precio|valor|cu[aá]nto cuesta|costo", wholeWord:false, text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
+    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",   rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", wholeWord:false, text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
+    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"env[ií]o|entrega|domicilio", wholeWord:false, text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
+    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", wholeWord:false, text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
   ];
 
-  // Exporta al motor: SIEMPRE insensible a mayúsculas (flag i)
+  // Exporta al motor: SIEMPRE insensible a mayúsculas (flag i) sin mostrarlo en UI
   function compileForEngine(list){
     const out = [];
     for (const r of list) {
       if (!r.enabled) continue;
       let pattern = "";
-      const mode = r.mode || "Contiene";
-
-      if (mode === "Cualquiera") {
-        // Cualquier mensaje (no vacío). Internamente usamos [\s\S]+
-        pattern = "[\\s\\S]+";
-      } else if (mode === "Regex") {
+      if (r.mode === "Regex") {
         pattern = String(r.rawRegex || "").trim();
         if (!pattern) continue;
       } else {
         const esc = escapeRegExp(String(r.text||""));
         if (!esc) continue;
-        switch(mode){
-          case "Contiene":   pattern = esc; break;
+        switch(r.mode){
+          case "Contiene":   pattern = r.wholeWord ? `\\b${esc}\\b` : esc; break;
           case "Empieza":    pattern = `^${esc}`; break;
           case "Termina":    pattern = `${esc}$`; break;
           case "Igual a":    pattern = `^${esc}$`; break;
           default:           pattern = esc;
         }
       }
-
-      const flags = "i"; // case-insensitive
+      const flags = "i"; // ← Siempre case-insensitive (simplificado)
       out.push({ pattern, flags, reply: String(r.reply||"") });
     }
     return out;
   }
 
-  // Intento de inflar desde compilado previo
+  // Intento de inflar desde compilado previo (ignoramos flags avanzadas)
   function inflateFromCompiled(compiled){
     const arr = [];
     for (const r of (compiled || [])) {
@@ -131,14 +123,9 @@
       let mode = "Regex";
       let text = "";
       let rawRegex = patt;
+      let wholeWord = false;
 
-      // Detectar "Cualquiera" viniendo de [\s\S]+
-      if (patt === "[\\s\\S]+") {
-        mode = "Cualquiera";
-        text = "";
-        rawRegex = "";
-      }
-      else if (/^\^.*\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1,-1))) {
+      if (/^\^.*\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1,-1))) {
         mode = "Igual a"; text = patt.slice(1,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
       else if (/^\^.+/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1))) {
@@ -147,15 +134,18 @@
       else if (/.+\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(0,-1))) {
         mode = "Termina"; text = patt.slice(0,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
+      else if (/^\\b.*\\b$/.test(patt) && !/[.*+?()|[\]\\]^$]/.test(patt.replace(/^\\b|\\b$/g,""))) {
+        mode = "Contiene"; wholeWord = true;
+        text = patt.replace(/^\\b|\\b$/g,"").replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      }
       else if (!/[.*+?()|[\]\\^$]/.test(patt)) {
         mode = "Contiene"; text = patt;
       }
 
       arr.push({
         enabled: true,
-        mode,
-        text,
-        rawRegex,
+        mode, text, rawRegex,
+        wholeWord,
         reply: String(r.reply||"")
       });
     }
@@ -308,11 +298,12 @@
       const center = document.createElement("div"); center.style.flex="1"; center.style.display="flex"; center.style.flexDirection="column"; center.style.gap="8px";
 
       const title = document.createElement("div"); title.className="vz-cardTitle";
+      title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`;
 
       const row1 = document.createElement("div"); row1.className="vz-row";
 
-      const mode = select(["Contiene","Igual a","Empieza","Termina","Regex","Cualquiera"], uiRules[i].mode || "Contiene");
-      mode.onchange = () => { uiRules[i].mode = mode.value; updateTitle(); saveDraft(); syncInputs(); };
+      const mode = select(["Contiene","Igual a","Empieza","Termina","Regex"], uiRules[i].mode || "Contiene");
+      mode.onchange = () => { uiRules[i].mode = mode.value; title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`; saveDraft(); syncInputs(); };
 
       const txt = input({placeholder:"texto a buscar…"}); txt.value = uiRules[i].text || "";
       txt.oninput = () => { uiRules[i].text = txt.value; saveDraft(); };
@@ -320,11 +311,14 @@
       const rx = input({placeholder:"expresión regular…"}); rx.value = uiRules[i].rawRegex || "";
       rx.oninput = () => { uiRules[i].rawRegex = rx.value; saveDraft(); };
 
+      // Solo dejamos “Palabra completa” (sin i / sin flags extra)
+      const ww = chip("Palabra completa", !!uiRules[i].wholeWord, (v)=>{ uiRules[i].wholeWord = v; saveDraft(); });
+
       const replyField = field("Respuesta", textarea()); replyField.querySelector("textarea").value = uiRules[i].reply || "";
       replyField.querySelector("textarea").oninput = (e)=>{ uiRules[i].reply = e.target.value; saveDraft(); };
 
       row1.append(label("Modo"), mode, spacer(), label("Texto/Regex"), txt, rx);
-      center.append(title, row1, replyField);
+      center.append(title, row1, ww, replyField);
 
       // Derecha: acciones (iconos)
       const right = document.createElement("div"); right.style.display="flex"; right.style.gap="6px"; right.style.alignItems="center";
@@ -338,32 +332,15 @@
       right.append(dup, del);
       card.append(left, center, right);
 
-      function updateTitle(){
-        const m = uiRules[i].mode || "Contiene";
-        if (m === "Regex") {
-          title.textContent = "Coincidencia: Expresión regular";
-        } else if (m === "Cualquiera") {
-          title.textContent = "Coincidencia: Cualquiera (cualquier mensaje)";
-        } else {
-          title.textContent = `Coincidencia: ${m}`;
-        }
-      }
-
       function syncInputs(){
-        const m = mode.value;
-        if (m === "Regex"){
-          txt.style.display="none";
-          rx.style.display="";
-        } else if (m === "Cualquiera") {
-          txt.style.display="none";
-          rx.style.display="none";
+        if (mode.value === "Regex"){
+          txt.style.display="none"; rx.style.display="";
+          ww.style.opacity = .35; ww.style.pointerEvents="none";
         } else {
-          txt.style.display="";
-          rx.style.display="none";
+          txt.style.display=""; rx.style.display="none";
+          ww.style.opacity = 1; ww.style.pointerEvents="auto";
         }
       }
-
-      updateTitle();
       syncInputs();
       return card;
     }
@@ -371,7 +348,7 @@
     function addRule(prefill){
       // Inserta al INICIO (primera prioridad) y limpia filtro para que se vea
       filterText = ""; const s = Q(".vz-colL input[type='text']"); if (s) s.value = "";
-      const item = prefill ? structuredClone(prefill) : { enabled:true, mode:"Contiene", text:"", rawRegex:"", reply:"" };
+      const item = prefill ? structuredClone(prefill) : { enabled:true, mode:"Contiene", text:"", wholeWord:false, rawRegex:"", reply:"" };
       uiRules.unshift(item);
       renderList();
       saveDraft();
@@ -498,6 +475,12 @@
       const s = document.createElement("span"); s.className="vz-label"; s.textContent = txt; return s;
     }
     function spacer(){ const s = document.createElement("span"); s.style.flex="0 0 8px"; return s; }
+    function chip(text, val, onChange){
+      const w = document.createElement("label"); w.className="vz-chip"; w.title = "Coincidir palabra completa (modos no-Regex)";
+      const c = document.createElement("input"); c.type = "checkbox"; c.checked = !!val; c.style.marginRight="6px";
+      const t = document.createElement("span"); t.textContent = text;
+      w.append(c,t); c.onchange = ()=> onChange?.(c.checked); return w;
+    }
     function flash(btn, txt){
       const old = btn.textContent; btn.textContent = "✓ " + (txt||"OK"); btn.disabled = true;
       setTimeout(()=>{ btn.textContent = old; btn.disabled = false; }, 900);
@@ -533,7 +516,7 @@
     const status = document.createElement("span");
     status.textContent = getEnabled() ? "Auto: ON" : "Auto: OFF";
 
-    const mkBtnTop = (label, bg) => {
+    const mkBtn = (label, bg) => {
       const b = document.createElement("button");
       b.textContent = label;
       Object.assign(b.style, {
@@ -546,7 +529,7 @@
       return b;
     };
 
-    const btnToggle = mkBtnTop(getEnabled() ? "Pausar" : "Reanudar", getEnabled() ? "#22c55e" : "#525252");
+    const btnToggle = mkBtn(getEnabled() ? "Pausar" : "Reanudar", getEnabled() ? "#22c55e" : "#525252");
     btnToggle.onclick = () => {
       const next = !getEnabled();
       setEnabled(next);
@@ -555,7 +538,7 @@
       btnToggle.style.background = next ? "#22c55e" : "#525252";
     };
 
-    const btnRules = mkBtnTop("Reglas", "#7c3aed");
+    const btnRules = mkBtn("Reglas", "#7c3aed");
     btnRules.onclick = () => onOpenRules?.();
 
     bar.append(status, btnToggle, btnRules);
