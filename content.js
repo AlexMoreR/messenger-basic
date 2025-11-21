@@ -1,5 +1,5 @@
 // content.js — Bot con COLA FIFO y anti-roaming (solo navega si hay item en cola)
-// v2.5 — 2025-11-02 (ajustado Marketplace)
+// v2.6 — 2025-11-02 (Marketplace + fix re-respuesta en mismo chat + modo "cualquiera")
 
 (() => {
   "use strict";
@@ -18,7 +18,7 @@
     MAX_OPEN_TRIES: 12,
 
     // 🔒 Anti-roaming: no recorrer chats automáticamente
-    AUTO_NAVIGATE_ON_UNREAD: false,  // nunca abrir "no leídos" en tick
+    AUTO_NAVIGATE_ON_UNREAD: false,
   };
 
   const DEFAULT_RULES = [
@@ -28,7 +28,7 @@
     { pattern: "env[ií]o|entrega|domicilio", flags: "i", reply: "¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" },
     { pattern: "^(hola|buen[oa]s|saludos)\\b", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." },
 
-    // Regla "cualquiera": cualquier mensaje no vacío
+    // Regla "cualquiera" por defecto (se verá como modo "Cualquiera" en la UI)
     {
       pattern: "[\\s\\S]+",
       flags: "i",
@@ -61,9 +61,30 @@
   /* ===== Storage ===== */
   const k = { rules: "__vz_rules_json", byThread: (tid, name) => `__vz_thread_${tid}_${name}` };
   const S = {
-    async get(key, fallback=null){ try{ if(chrome?.storage?.local){ const out=await chrome.storage.local.get(key); return out?.[key] ?? fallback; } }catch{}
-      try{ const raw=localStorage.getItem(key); return raw===null?fallback:JSON.parse(raw); }catch{ const raw=localStorage.getItem(key); return raw ?? fallback; } },
-    async set(key,val){ try{ if(chrome?.storage?.local){ await chrome.storage.local.set({[key]:val}); return; } }catch{} localStorage.setItem(key, typeof val==="string"? val: JSON.stringify(val)); }
+    async get(key, fallback=null){
+      try{
+        if (chrome?.storage?.local){
+          const out = await chrome.storage.local.get(key);
+          return out?.[key] ?? fallback;
+        }
+      }catch{}
+      try{
+        const raw = localStorage.getItem(key);
+        return raw === null ? fallback : JSON.parse(raw);
+      }catch{
+        const raw = localStorage.getItem(key);
+        return raw ?? fallback;
+      }
+    },
+    async set(key,val){
+      try{
+        if (chrome?.storage?.local){
+          await chrome.storage.local.set({[key]:val});
+          return;
+        }
+      }catch{}
+      localStorage.setItem(key, typeof val==="string"? val: JSON.stringify(val));
+    }
   };
 
   /* ===== Estado ===== */
@@ -85,7 +106,7 @@
   const queue = [];
   let processing = false;
 
-  // Unread watcher (delta): record de “no leído” previo para no re-encolar
+  // Watcher de “no leídos” (sidebar)
   const unreadSeen = new Set();
 
   // Flag: hasta cuándo consideramos que el operador está tecleando
@@ -131,11 +152,17 @@
   };
 
   const clickUnreadDividerIfAny = () => {
-    const KEYS = ["mensajes no leidos","mensajes no leídos","ver mensajes no leidos","ver mensajes no leídos","nuevos mensajes","new messages","unread messages"].map(normalize);
+    const KEYS = [
+      "mensajes no leidos","mensajes no leídos",
+      "ver mensajes no leidos","ver mensajes no leídos",
+      "nuevos mensajes","new messages","unread messages"
+    ].map(normalize);
     for (const el of QA("div,span,button,a")) {
       if (!isVisible(el)) continue;
       const t = normalize(el.innerText || el.textContent || "");
-      if (KEYS.some(k => t.includes(k))) { try { el.scrollIntoView({ block: "center" }); el.click(); return true; } catch {} }
+      if (KEYS.some(k => t.includes(k))) {
+        try { el.scrollIntoView({ block: "center" }); el.click(); return true; } catch {}
+      }
     }
     return false;
   };
@@ -143,7 +170,12 @@
   const openThreadById = (tid) => {
     const link = getThreadLinks().find(a => getThreadIdFromHref(a.getAttribute("href")) === tid);
     if (!link) return false;
-    try { link.scrollIntoView({ block: "center", inline: "center" }); link.click(); } catch { try { link?.click(); } catch {} }
+    try {
+      link.scrollIntoView({ block: "center", inline: "center" });
+      link.click();
+    } catch {
+      try { link?.click(); } catch {}
+    }
     pendingAutoOpenTid = tid;
     setTimeout(() => clickUnreadDividerIfAny(), 200);
     return true;
@@ -189,9 +221,15 @@
   const pasteMultiline = (el, text) => {
     const parts = String(text).replace(/\r\n?/g,"\n").split("\n");
     try{ el.focus(); }catch{}
-    parts.forEach((t,i)=>{ if(t){ const ok=document.execCommand("insertText", false, t); if(!ok) el.textContent=(el.textContent||"")+t;
-      el.dispatchEvent(new InputEvent("input",{bubbles:true,cancelable:true})); el.dispatchEvent(new Event("change",{bubbles:true})); }
-      if(i<parts.length-1) shiftEnter(el); });
+    parts.forEach((t,i)=>{
+      if(t){
+        const ok=document.execCommand("insertText", false, t);
+        if(!ok) el.textContent=(el.textContent||"")+t;
+        el.dispatchEvent(new InputEvent("input",{bubbles:true,cancelable:true}));
+        el.dispatchEvent(new Event("change",{bubbles:true}));
+      }
+      if(i<parts.length-1) shiftEnter(el);
+    });
   };
   const sendText = async (tid, text) => {
     if (!text) return false;
@@ -260,24 +298,34 @@
     return { text: "", dir: "in", count: 0, hash: "0" };
   };
 
-
   /* ===== Reglas ===== */
   const compileRule = (r)=>{ try{ return { re:new RegExp(r.pattern, r.flags||"i"), reply:r.reply }; }catch{ return null; } };
   const compileAll = (arr)=>(Array.isArray(arr)?arr:[]).map(compileRule).filter(Boolean);
 
   /* ===== Per-thread keys ===== */
   const lastReplyAtKey      = (tid)=> k.byThread(tid,"last_reply_at");
-  const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");   // djb2(reply)
+  const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");
   const lastIncomingHashKey = (tid)=> k.byThread(tid,"last_in_hash");
   const baselineHashKey     = (tid)=> k.byThread(tid,"baseline_hash");
 
   /* ===== Cola ===== */
+
+  // Para "no leídos" (sidebar): una vez por transición a no-leído
   const enqueueTidOnce = (tid) => {
-    // Evita duplicados: solo encola si NO estaba marcado como "no leído" antes
     if (unreadSeen.has(tid)) return;
     unreadSeen.add(tid);
     queue.push({ tid, enqueuedAt: now(), tries: 0 });
     log("[queue] +tid", tid, "len:", queue.length);
+    processQueueSoon();
+  };
+
+  // Para chat activo: re-usable, sin depender de unreadSeen
+  const enqueueActiveTid = (tid) => {
+    if (queue.some(item => item.tid === tid)) {
+      return;
+    }
+    queue.push({ tid, enqueuedAt: now(), tries: 0 });
+    log("[queue-active] +tid", tid, "len:", queue.length);
     processQueueSoon();
   };
 
@@ -318,7 +366,6 @@
     const incomingPlain = djb2(text);
     const lastSentPlain = await S.get(lastSentHashKey(tid), "");
     if (String(lastSentPlain) === String(incomingPlain)) {
-      // Lo marcamos como gestionado y listo
       await S.set(lastIncomingHashKey(tid), hash);
       return { done: true };
     }
@@ -328,7 +375,7 @@
       return { done: false, wait: 300 };
     }
 
-    // ¿ya atendido?
+    // ¿ya atendido este mensaje?
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     if (String(lastIn) === String(hash)) return { done: true };
 
@@ -383,14 +430,20 @@
         const item = queue[0];
         const tid = item.tid;
 
-        if (inFlightPerThread.has(tid)) { await sleep(CFG.QUEUE_RETRY_MS); continue; }
+        if (inFlightPerThread.has(tid)) {
+          await sleep(CFG.QUEUE_RETRY_MS);
+          continue;
+        }
         inFlightPerThread.add(tid);
 
         let res;
         try { res = await replyForThread(tid); }
         finally { inFlightPerThread.delete(tid); }
 
-        if (res?.done) { queue.shift(); continue; }
+        if (res?.done) {
+          queue.shift();
+          continue;
+        }
 
         item.tries += 1;
         await sleep(Math.max(CFG.QUEUE_RETRY_MS, res?.wait || 400));
@@ -419,11 +472,14 @@
     lastBubbleHashMem.set(tid, hash);
 
     // Importante: no navegamos; solo encolamos TID (anti-roaming)
-    enqueueTidOnce(tid);
+    enqueueActiveTid(tid);
   };
 
   const getMessagesRoot = () => (
-    Q('[role="grid"]') || Q('[data-testid="mwthreadlist"]') || Q('[data-pagelet*="Pagelet"]') || document.body
+    Q('[role="grid"]') ||
+    Q('[data-testid="mwthreadlist"]') ||
+    Q('[data-pagelet*="Pagelet"]') ||
+    document.body
   );
 
   const attachObserver = () => {
@@ -446,25 +502,44 @@
       }, 70);
     });
 
-    const opts = { childList:true, subtree:true, characterData:true, attributes:true, attributeFilter:["aria-label","data-testid","class","dir"] };
+    const opts = {
+      childList:true,
+      subtree:true,
+      characterData:true,
+      attributes:true,
+      attributeFilter:["aria-label","data-testid","class","dir"]
+    };
     msgObserver.observe(root, opts);
     if (root !== document.body) msgObserver.observe(document.body, opts);
     lastMutationAt = now();
     log("[observer] enganchado");
   };
 
-  const detachObserver = () => { try{ msgObserver?.disconnect(); }catch{} msgObserver=null; observedRoot=null; };
+  const detachObserver = () => {
+    try{ msgObserver?.disconnect(); }catch{}
+    msgObserver=null; observedRoot=null;
+  };
 
   const watchdogObserver = () => {
     setInterval(() => {
       const root = getMessagesRoot();
-      if (root && root !== observedRoot) { log("[observer] root cambió → rehook"); attachObserver(); return; }
-      if (now() - lastMutationAt > CFG.STUCK_REHOOK_MS) { log("[observer] sin mutaciones → rehook"); attachObserver(); }
+      if (root && root !== observedRoot) {
+        log("[observer] root cambió → rehook");
+        attachObserver();
+        return;
+      }
+      if (now() - lastMutationAt > CFG.STUCK_REHOOK_MS) {
+        log("[observer] sin mutaciones → rehook");
+        attachObserver();
+      }
     }, Math.max(1500, CFG.SCAN_EVERY_MS * 2));
   };
 
   /* ===== Cambio de hilo / URL ===== */
-  const getBaselineHash = () => { const { dir, text, count } = getLastBubbleInfo(); return djb2(`${dir}|${text}|#${count}`); };
+  const getBaselineHash = () => {
+    const { dir, text, count } = getLastBubbleInfo();
+    return djb2(`${dir}|${text}|#${count}`);
+  };
 
   const onThreadChanged = async (newTid) => {
     const tid = newTid || "unknown";
@@ -505,11 +580,9 @@
 
     // 2) Watcher delta de “no leídos”: solo encola TID cuando aparecen nuevos no leídos
     const unreadTids = listUnreadTidsFromSidebar();
-    // marca nuevos (delta)
     for (const tid of unreadTids) {
       if (!unreadSeen.has(tid)) enqueueTidOnce(tid);
     }
-    // limpia los que ya no están no leídos
     for (const tid of [...unreadSeen]) {
       if (!unreadTids.includes(tid)) unreadSeen.delete(tid);
     }
@@ -519,26 +592,42 @@
 
     // 4) Anti-roaming: NO abrir no leídos automáticamente
     if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && unreadTids.length) {
-      // openThreadById(unreadTids[0]); // ← Desactivado por defecto
+      // openThreadById(unreadTids[0]);
     }
   };
 
   /* ===== UI (opcional) ===== */
-  const loadRulesJson = async () => { let raw = await S.get(k.rules, null); if (!raw) raw = JSON.stringify(DEFAULT_RULES, null, 2); return raw; };
-  const saveRulesJson = async (raw) => { rules = JSON.parse(raw); compiledRules = compileAll(rules); await S.set(k.rules, JSON.stringify(rules, null, 2)); log("[rules] guardadas/recompiladas"); };
+  const loadRulesJson = async () => {
+    let raw = await S.get(k.rules, null);
+    if (!raw) raw = JSON.stringify(DEFAULT_RULES, null, 2);
+    return raw;
+  };
+  const saveRulesJson = async (raw) => {
+    rules = JSON.parse(raw);
+    compiledRules = compileAll(rules);
+    await S.set(k.rules, JSON.stringify(rules, null, 2));
+    log("[rules] guardadas/recompiladas");
+  };
   const bindUI = () => {
     if (!window.VZUI) return;
     window.VZUI.injectTopBar({
       getEnabled: () => enabled,
       setEnabled: (v) => { enabled = !!v; },
-      onOpenRules: () => window.VZUI.openRulesModal({ loadRules: () => loadRulesJson(), saveRules: (raw) => saveRulesJson(raw) })
+      onOpenRules: () => window.VZUI.openRulesModal({
+        loadRules: () => loadRulesJson(),
+        saveRules: (raw) => saveRulesJson(raw)
+      })
     });
   };
 
   /* ===== Init ===== */
   const init = async () => {
-    try { const r = await S.get(k.rules, null); rules = r ? JSON.parse(r) : DEFAULT_RULES.slice(); }
-    catch { rules = DEFAULT_RULES.slice(); }
+    try {
+      const r = await S.get(k.rules, null);
+      rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
+    } catch {
+      rules = DEFAULT_RULES.slice();
+    }
     compiledRules = compileAll(rules);
 
     bindUI();
@@ -564,6 +653,10 @@
     off: () => { enabled = false; },
     tick, queue,
     async rules(){ return rules; },
-    async setRules(arr){ if(!Array.isArray(arr)) throw new Error("setRules espera array"); rules=arr; compiledRules=compileAll(rules); await S.set(k.rules, JSON.stringify(rules, null, 2)); }
+    async setRules(arr){
+      if(!Array.isArray(arr)) throw new Error("setRules espera array");
+      rules=arr; compiledRules=compileAll(rules);
+      await S.set(k.rules, JSON.stringify(rules, null, 2));
+    }
   };
 })();

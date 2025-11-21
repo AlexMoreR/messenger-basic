@@ -1,4 +1,4 @@
-// ui.js — Panel visual de reglas (simple, sin flags visibles) para VZ-Bot
+// ui.js — Panel visual de reglas para VZ-Bot
 // - Sin dependencias externas
 // - Guarda UI propia en __vz_rules_ui y publica reglas compiladas en __vz_rules_json
 // - Compatible con content.js existente (usa window.VZUI.injectTopBar / openRulesModal)
@@ -18,11 +18,26 @@
   };
   const S = {
     async get(key, fallback=null){
-      try { if (chrome?.storage?.local){ const o = await chrome.storage.local.get(key); return o?.[key] ?? fallback; } } catch {}
-      try { const raw = localStorage.getItem(key); return raw===null?fallback:JSON.parse(raw); } catch { return fallback; }
+      try {
+        if (chrome?.storage?.local){
+          const o = await chrome.storage.local.get(key);
+          return o?.[key] ?? fallback;
+        }
+      } catch {}
+      try {
+        const raw = localStorage.getItem(key);
+        return raw===null?fallback:JSON.parse(raw);
+      } catch {
+        return fallback;
+      }
     },
     async set(key, val){
-      try { if (chrome?.storage?.local){ await chrome.storage.local.set({[key]:val}); return; } } catch {}
+      try {
+        if (chrome?.storage?.local){
+          await chrome.storage.local.set({[key]:val});
+          return;
+        }
+      } catch {}
       localStorage.setItem(key, typeof val==="string" ? val : JSON.stringify(val));
     }
   };
@@ -76,46 +91,49 @@
   const UI_KEY = "__vz_rules_ui";
 
   // Modelo UI por regla
-  // { enabled, mode, text, rawRegex, wholeWord, reply }
+  // { enabled, mode, text, rawRegex, reply }
   let uiRules = [];
   let filterText = "";
   let panelOpen = false;
 
   const templates = [
-    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"^(hola|buen[oa]s|saludos)\\b", wholeWord:false, text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
-    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"precio|valor|cu[aá]nto cuesta|costo", wholeWord:false, text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
-    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",   rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", wholeWord:false, text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
-    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"env[ií]o|entrega|domicilio", wholeWord:false, text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
-    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",   rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", wholeWord:false, text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
+    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"^(hola|buen[oa]s|saludos)\\b", text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
+    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"precio|valor|cu[aá]nto cuesta|costo", text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
+    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",      rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
+    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"env[ií]o|entrega|domicilio", text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
+    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
+    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", rawRegex:"", text:"", reply:"Gracias por tu mensaje 🙌\n\nEn un momento un asesor revisará tu consulta." } },
   ];
 
-  // Exporta al motor: SIEMPRE insensible a mayúsculas (flag i) sin mostrarlo en UI
+  // Exporta al motor: modo "Cualquiera" genera [\s\S]+, siempre con flag i
   function compileForEngine(list){
     const out = [];
     for (const r of list) {
       if (!r.enabled) continue;
       let pattern = "";
-      if (r.mode === "Regex") {
+      if (r.mode === "Cualquiera") {
+        pattern = "[\\s\\S]+";
+      } else if (r.mode === "Regex") {
         pattern = String(r.rawRegex || "").trim();
         if (!pattern) continue;
       } else {
         const esc = escapeRegExp(String(r.text||""));
         if (!esc) continue;
         switch(r.mode){
-          case "Contiene":   pattern = r.wholeWord ? `\\b${esc}\\b` : esc; break;
+          case "Contiene":   pattern = esc; break;
           case "Empieza":    pattern = `^${esc}`; break;
           case "Termina":    pattern = `${esc}$`; break;
           case "Igual a":    pattern = `^${esc}$`; break;
           default:           pattern = esc;
         }
       }
-      const flags = "i"; // ← Siempre case-insensitive (simplificado)
+      const flags = "i"; // siempre case-insensitive
       out.push({ pattern, flags, reply: String(r.reply||"") });
     }
     return out;
   }
 
-  // Intento de inflar desde compilado previo (ignoramos flags avanzadas)
+  // Intento de inflar desde compilado previo (incluye detectar "Cualquiera")
   function inflateFromCompiled(compiled){
     const arr = [];
     for (const r of (compiled || [])) {
@@ -123,29 +141,31 @@
       let mode = "Regex";
       let text = "";
       let rawRegex = patt;
-      let wholeWord = false;
 
-      if (/^\^.*\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1,-1))) {
-        mode = "Igual a"; text = patt.slice(1,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+      if (patt === "[\\s\\S]+" || patt === "[\\s\\S]+?") {
+        mode = "Cualquiera";
+        rawRegex = "";
+      }
+      else if (/^\^.*\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1,-1))) {
+        mode = "Igual a";
+        text = patt.slice(1,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
       else if (/^\^.+/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(1))) {
-        mode = "Empieza"; text = patt.slice(1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+        mode = "Empieza";
+        text = patt.slice(1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
       else if (/.+\$$/.test(patt) && !/[.*+?()|[\]\\]/.test(patt.slice(0,-1))) {
-        mode = "Termina"; text = patt.slice(0,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
-      }
-      else if (/^\\b.*\\b$/.test(patt) && !/[.*+?()|[\]\\]^$]/.test(patt.replace(/^\\b|\\b$/g,""))) {
-        mode = "Contiene"; wholeWord = true;
-        text = patt.replace(/^\\b|\\b$/g,"").replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
+        mode = "Termina";
+        text = patt.slice(0,-1).replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
       else if (!/[.*+?()|[\]\\^$]/.test(patt)) {
-        mode = "Contiene"; text = patt;
+        mode = "Contiene";
+        text = patt.replace(/\\([.*+?^${}()|[\]\\])/g,"$1");
       }
 
       arr.push({
         enabled: true,
         mode, text, rawRegex,
-        wholeWord,
         reply: String(r.reply||"")
       });
     }
@@ -288,8 +308,22 @@
       const reorder = document.createElement("div"); reorder.className="vz-reorder";
       const up = mkIconBtn(svgChevronUp(), "Subir prioridad", "#374151");
       const down = mkIconBtn(svgChevronDown(), "Bajar prioridad", "#374151");
-      up.onclick = () => { if (i>0){ const t=uiRules[i]; uiRules.splice(i,1); uiRules.splice(i-1,0,t); saveDraft(); renderList(); } };
-      down.onclick = () => { if (i<uiRules.length-1){ const t=uiRules[i]; uiRules.splice(i,1); uiRules.splice(i+1,0,t); saveDraft(); renderList(); } };
+      up.onclick = () => {
+        if (i>0){
+          const t=uiRules[i];
+          uiRules.splice(i,1);
+          uiRules.splice(i-1,0,t);
+          saveDraft(); renderList();
+        }
+      };
+      down.onclick = () => {
+        if (i<uiRules.length-1){
+          const t=uiRules[i];
+          uiRules.splice(i,1);
+          uiRules.splice(i+1,0,t);
+          saveDraft(); renderList();
+        }
+      };
 
       reorder.append(up,down);
       left.append(enChk, prio, reorder);
@@ -298,12 +332,20 @@
       const center = document.createElement("div"); center.style.flex="1"; center.style.display="flex"; center.style.flexDirection="column"; center.style.gap="8px";
 
       const title = document.createElement("div"); title.className="vz-cardTitle";
-      title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`;
+      title.textContent = uiRules[i].mode === "Regex"
+        ? "Coincidencia: Expresión regular"
+        : `Coincidencia: ${uiRules[i].mode}`;
 
-      const row1 = document.createElement("div"); row1.className="vz-row";
+      const row1 = document.createElement("div"); row1.className = "vz-row";
 
-      const mode = select(["Contiene","Igual a","Empieza","Termina","Regex"], uiRules[i].mode || "Contiene");
-      mode.onchange = () => { uiRules[i].mode = mode.value; title.textContent = uiRules[i].mode === "Regex" ? "Coincidencia: Expresión regular" : `Coincidencia: ${uiRules[i].mode}`; saveDraft(); syncInputs(); };
+      const mode = select(["Cualquiera","Contiene","Igual a","Empieza","Termina","Regex"], uiRules[i].mode || "Contiene");
+      mode.onchange = () => {
+        uiRules[i].mode = mode.value;
+        title.textContent = uiRules[i].mode === "Regex"
+          ? "Coincidencia: Expresión regular"
+          : `Coincidencia: ${uiRules[i].mode}`;
+        saveDraft(); syncInputs();
+      };
 
       const txt = input({placeholder:"texto a buscar…"}); txt.value = uiRules[i].text || "";
       txt.oninput = () => { uiRules[i].text = txt.value; saveDraft(); };
@@ -311,34 +353,44 @@
       const rx = input({placeholder:"expresión regular…"}); rx.value = uiRules[i].rawRegex || "";
       rx.oninput = () => { uiRules[i].rawRegex = rx.value; saveDraft(); };
 
-      // Solo dejamos “Palabra completa” (sin i / sin flags extra)
-      const ww = chip("Palabra completa", !!uiRules[i].wholeWord, (v)=>{ uiRules[i].wholeWord = v; saveDraft(); });
-
-      const replyField = field("Respuesta", textarea()); replyField.querySelector("textarea").value = uiRules[i].reply || "";
+      const replyField = field("Respuesta", textarea());
+      replyField.querySelector("textarea").value = uiRules[i].reply || "";
       replyField.querySelector("textarea").oninput = (e)=>{ uiRules[i].reply = e.target.value; saveDraft(); };
 
       row1.append(label("Modo"), mode, spacer(), label("Texto/Regex"), txt, rx);
-      center.append(title, row1, ww, replyField);
+      center.append(title, row1, replyField);
 
       // Derecha: acciones (iconos)
       const right = document.createElement("div"); right.style.display="flex"; right.style.gap="6px"; right.style.alignItems="center";
 
       const dup = mkIconBtn(svgDuplicate(), "Duplicar", "#374151");
-      dup.onclick = () => { const c = structuredClone(uiRules[i]); uiRules.splice(i+1, 0, c); saveDraft(); renderList(); };
+      dup.onclick = () => {
+        const c = structuredClone(uiRules[i]);
+        uiRules.splice(i+1, 0, c);
+        saveDraft(); renderList();
+      };
 
       const del = mkIconBtn(svgTrash(), "Eliminar", "#ef4444");
-      del.onclick = () => { if (confirm("¿Eliminar esta regla?")){ uiRules.splice(i,1); saveDraft(); renderList(); } };
+      del.onclick = () => {
+        if (confirm("¿Eliminar esta regla?")){
+          uiRules.splice(i,1);
+          saveDraft(); renderList();
+        }
+      };
 
       right.append(dup, del);
       card.append(left, center, right);
 
       function syncInputs(){
         if (mode.value === "Regex"){
-          txt.style.display="none"; rx.style.display="";
-          ww.style.opacity = .35; ww.style.pointerEvents="none";
+          txt.style.display="none";
+          rx.style.display="";
+        } else if (mode.value === "Cualquiera"){
+          txt.style.display="none";
+          rx.style.display="none";
         } else {
-          txt.style.display=""; rx.style.display="none";
-          ww.style.opacity = 1; ww.style.pointerEvents="auto";
+          txt.style.display="";
+          rx.style.display="none";
         }
       }
       syncInputs();
@@ -347,8 +399,12 @@
 
     function addRule(prefill){
       // Inserta al INICIO (primera prioridad) y limpia filtro para que se vea
-      filterText = ""; const s = Q(".vz-colL input[type='text']"); if (s) s.value = "";
-      const item = prefill ? structuredClone(prefill) : { enabled:true, mode:"Contiene", text:"", wholeWord:false, rawRegex:"", reply:"" };
+      filterText = "";
+      const s = Q(".vz-colL input[type='text']");
+      if (s) s.value = "";
+      const item = prefill ? structuredClone(prefill) : {
+        enabled:true, mode:"Contiene", text:"", rawRegex:"", reply:""
+      };
       uiRules.unshift(item);
       renderList();
       saveDraft();
@@ -385,7 +441,11 @@
           out.className = "vz-note vz-hit";
           out.innerHTML = `✔ Coincide la <b>regla #${matched.idx+1}</b>. Respondería:<br><pre style="white-space:pre-wrap;margin:6px 0 0">${escapeHtml(matched.rule.reply)}</pre>`;
           const card = listWrap.children[matched.idx];
-          if (card) { card.classList.add("vz-newpulse"); setTimeout(()=>card.classList.remove("vz-newpulse"), 1400); card.scrollIntoView({behavior:"smooth", block:"nearest"}); }
+          if (card) {
+            card.classList.add("vz-newpulse");
+            setTimeout(()=>card.classList.remove("vz-newpulse"), 1400);
+            card.scrollIntoView({behavior:"smooth", block:"nearest"});
+          }
         } else {
           out.className = "vz-note vz-nohit";
           out.textContent = "✖ Ninguna regla coincide.";
@@ -475,12 +535,6 @@
       const s = document.createElement("span"); s.className="vz-label"; s.textContent = txt; return s;
     }
     function spacer(){ const s = document.createElement("span"); s.style.flex="0 0 8px"; return s; }
-    function chip(text, val, onChange){
-      const w = document.createElement("label"); w.className="vz-chip"; w.title = "Coincidir palabra completa (modos no-Regex)";
-      const c = document.createElement("input"); c.type = "checkbox"; c.checked = !!val; c.style.marginRight="6px";
-      const t = document.createElement("span"); t.textContent = text;
-      w.append(c,t); c.onchange = ()=> onChange?.(c.checked); return w;
-    }
     function flash(btn, txt){
       const old = btn.textContent; btn.textContent = "✓ " + (txt||"OK"); btn.disabled = true;
       setTimeout(()=>{ btn.textContent = old; btn.disabled = false; }, 900);
