@@ -1,5 +1,5 @@
 // content.js — Bot con COLA FIFO y anti-roaming (solo navega si hay item en cola)
-// v2.6 — 2025-11-02 (Marketplace + fix re-respuesta en mismo chat + modo "cualquiera")
+// v2.7 — 2026-02-16 (FIX: Respuesta duplicada + mejoras de detección)
 
 (() => {
   "use strict";
@@ -8,7 +8,7 @@
     AUTO_START: true,
     SCAN_EVERY_MS: 900,
     REPLY_COOLDOWN_MS: 12000,
-    THREAD_LOAD_SILENCE_MS: 650,
+    THREAD_LOAD_SILENCE_MS: 3000, // ✅ AUMENTADO: 3 segundos al cargar un hilo
     SEND_COOLDOWN_MS: 1400,
     DEFAULT_FALLBACK: "",
     DEBUG: true,
@@ -19,6 +19,9 @@
 
     // 🔒 Anti-roaming: no recorrer chats automáticamente
     AUTO_NAVIGATE_ON_UNREAD: false,
+    
+    // ✅ NUEVO: Tiempo mínimo entre detección de burbujas
+    BUBBLE_DETECTION_COOLDOWN_MS: 800,
   };
 
   const DEFAULT_RULES = [
@@ -37,7 +40,11 @@
   ];
 
   /* ===== Utils ===== */
-  const log = (...a) => CFG.DEBUG && console.log("[VZ-Bot]", ...a);
+  const log = (...a) => {
+    if (!CFG.DEBUG) return;
+    const time = new Date().toLocaleTimeString('es-ES', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+    console.log(`[VZ-Bot ${time}]`, ...a);
+  };
   const now = () => Date.now();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const Q  = (sel, r=document) => r.querySelector(sel);
@@ -94,7 +101,7 @@
   let scanTimer = null;
 
   let currentTid = null;
-  let threadSilenceUntil = 0;
+  const threadSilenceUntil = new Map(); // tid -> timestamp (CAMBIADO: era variable global)
   let msgObserver = null, lastMutationAt = 0, observedRoot = null;
   let pendingAutoOpenTid = null;
 
@@ -106,12 +113,15 @@
   const queue = [];
   let processing = false;
 
-  // Watcher de “no leídos” (sidebar)
+  // Watcher de "no leídos" (sidebar)
   const unreadSeen = new Set();
 
   // Flag: hasta cuándo consideramos que el operador está tecleando
   let operatorTypingUntil = 0;
   let lastComposerEl = null;
+
+  // ✅ NUEVO: Control de detección de burbujas
+  let lastBubbleDetectionAt = 0;
 
   /* ===== Messenger helpers ===== */
   const MSG_ROW_SELECTORS = [
@@ -197,9 +207,13 @@
     if (composer && composer !== lastComposerEl) {
       lastComposerEl = composer;
       try {
-        composer.addEventListener("keydown", () => {
-          operatorTypingUntil = now() + 5000; // 5s desde la última tecla
-        }, { capture: true });
+        // ✅ MEJORADO: Detectar múltiples eventos para capturar actividad del operador
+        ['focus', 'input', 'paste', 'keydown'].forEach(evt => {
+          composer.addEventListener(evt, () => {
+            operatorTypingUntil = now() + 5000; // 5s desde la última actividad
+            log("[composer] operador activo, pausando auto-respuesta por 5s");
+          }, { capture: true });
+        });
       } catch {}
     }
 
@@ -240,10 +254,11 @@
     return true;
   };
 
-  /* ===== Última burbuja ===== */
+  /* ===== Última burbuja (MEJORADO) ===== */
   const getLastBubbleInfo = () => {
     const bubbles = QA(MSG_ROW_SELECTORS.join(","), document.body).filter(isVisible);
     const count = bubbles.length;
+    
     for (let i = count - 1; i >= 0; i--) {
       const b = bubbles[i];
       if (/\b(reaction|sticker|emoji|system)\b/i.test(b.getAttribute("data-testid") || "")) continue;
@@ -267,25 +282,36 @@
       const aria = (b.getAttribute("aria-label") || "").toLowerCase();
       const msgId = b.getAttribute("data-message-id") || b.id || i;
 
-      // 1) pistas fuertes de mensaje propio (out)
+      // ✅ MEJORADO: Detección de dirección con más pistas
+      let dir = null;
+
+      // 1) Pistas fuertes de mensaje propio (out)
       if (isOutHint(text) || isOutHint(aria)) {
         const hash = djb2(`out|${text}|#${count}|${msgId}`);
         return { text, dir: "out", count, hash };
       }
 
       // 2) testid de la plataforma
-      let dir = null;
       if (/incoming/.test(testid)) dir = "in";
       else if (/outgoing/.test(testid)) dir = "out";
 
-      // 3) NO asumir "in" solo por tener aria; solo out si suena a enviado por ti
+      // 3) aria label con pistas de enviado
       if (!dir && aria) {
-        if (/(you sent|has enviado|enviaste|mensaje enviado|enviado por ti)/.test(aria)) {
+        if (/(you sent|has enviado|enviaste|mensaje enviado|enviado por ti|sent by you)/.test(aria)) {
           dir = "out";
+        }
+        // ✅ NUEVO: También detectar mensajes recibidos
+        if (/(received|recibido|mensaje de)/.test(aria)) {
+          dir = "in";
         }
       }
 
-      // 4) fallback geométrico: derecha = out, izquierda = in
+      // 4) ✅ NUEVO: Verificar clases CSS que indican dirección
+      const classList = b.className || "";
+      if (classList.includes("outgoing") || classList.includes("sent")) dir = "out";
+      if (classList.includes("incoming") || classList.includes("received")) dir = "in";
+
+      // 5) Fallback geométrico solo si no hay otra pista
       if (!dir) {
         const rect = b.getBoundingClientRect();
         const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
@@ -307,26 +333,52 @@
   const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");
   const lastIncomingHashKey = (tid)=> k.byThread(tid,"last_in_hash");
   const baselineHashKey     = (tid)=> k.byThread(tid,"baseline_hash");
+  // ✅ NUEVO: Key para guardar contenido literal del último mensaje enviado
+  const lastSentContentKey  = (tid)=> k.byThread(tid,"last_sent_content");
 
   /* ===== Cola ===== */
 
+  // ✅ CORREGIDO: Función unificada para encolar sin duplicados
+  const enqueueTid = (tid, source = "unknown") => {
+    // Verificar si ya está en cola
+    if (queue.some(item => item.tid === tid)) {
+      log("[queue] tid ya en cola, ignorando:", tid, "source:", source);
+      return false;
+    }
+    
+    // Verificar si ya está siendo procesado
+    if (inFlightPerThread.has(tid)) {
+      log("[queue] tid en proceso, ignorando:", tid, "source:", source);
+      return false;
+    }
+    
+    queue.push({ tid, enqueuedAt: now(), tries: 0 });
+    log("[queue] +tid", tid, "source:", source, "len:", queue.length);
+    processQueueSoon();
+    return true;
+  };
+
   // Para "no leídos" (sidebar): una vez por transición a no-leído
   const enqueueTidOnce = (tid) => {
-    if (unreadSeen.has(tid)) return;
+    if (unreadSeen.has(tid)) {
+      log("[queue] tid ya en unreadSeen, saltando:", tid);
+      return;
+    }
     unreadSeen.add(tid);
-    queue.push({ tid, enqueuedAt: now(), tries: 0 });
-    log("[queue] +tid", tid, "len:", queue.length);
-    processQueueSoon();
+    
+    // ✅ Verificar silence period antes de encolar
+    const tidSilenceUntil = threadSilenceUntil.get(tid) || 0;
+    if (now() < tidSilenceUntil) {
+      log("[queue] tid en silence period desde sidebar, NO encolando:", tid);
+      return;
+    }
+    
+    enqueueTid(tid, "sidebar-unread");
   };
 
   // Para chat activo: re-usable, sin depender de unreadSeen
   const enqueueActiveTid = (tid) => {
-    if (queue.some(item => item.tid === tid)) {
-      return;
-    }
-    queue.push({ tid, enqueuedAt: now(), tries: 0 });
-    log("[queue-active] +tid", tid, "len:", queue.length);
-    processQueueSoon();
+    enqueueTid(tid, "active-chat");
   };
 
   const processQueueSoon = () => { if (!processing) setTimeout(processQueue, 20); };
@@ -351,7 +403,13 @@
       return { done: false, wait: CFG.THREAD_LOAD_SILENCE_MS + 80 };
     }
 
-    if (now() < threadSilenceUntil) return { done: false, wait: threadSilenceUntil - now() };
+    // ✅ Verificar silence period específico de este hilo
+    const silenceUntil = threadSilenceUntil.get(tid) || 0;
+    if (now() < silenceUntil) {
+      log("[reply] hilo en silence period, esperando...", tid);
+      return { done: false, wait: silenceUntil - now() };
+    }
+    
     if (now() < (sendCooldownUntil.get(tid) || 0)) {
       return { done: false, wait: (sendCooldownUntil.get(tid) || 0) - now() };
     }
@@ -362,11 +420,21 @@
       return { done: false, wait: 300 };
     }
 
-    // Evitar responder a nuestro propio último mensaje (por contenido)
+    // ✅ MEJORADO: Evitar responder a nuestro propio último mensaje (verificación robusta)
     const incomingPlain = djb2(text);
     const lastSentPlain = await S.get(lastSentHashKey(tid), "");
-    if (String(lastSentPlain) === String(incomingPlain)) {
+    const lastSentContent = await S.get(lastSentContentKey(tid), "");
+    
+    // Verificamos si el texto actual es exactamente lo que acabamos de enviar
+    const isSameHash = String(lastSentPlain) === String(incomingPlain);
+    const isSameContent = lastSentContent && text.trim() === lastSentContent.trim();
+    const containsSentText = lastSentContent && 
+                             text.includes(lastSentContent.substring(0, Math.min(50, lastSentContent.length)));
+    
+    if (isSameHash || isSameContent || containsSentText) {
+      // Es nuestro propio mensaje, marcar como procesado y salir
       await S.set(lastIncomingHashKey(tid), hash);
+      log("[reply] mensaje propio detectado, ignorando", tid);
       return { done: true };
     }
 
@@ -411,11 +479,28 @@
     const ok = await sendText(tid, reply);
     if (ok) {
       const ts = now();
+      
+      // Esperar a que Facebook renderice la burbuja
+      await sleep(500);
+      
+      // Obtener el hash de la burbuja que acabamos de crear
+      const { hash: newBubbleHash } = getLastBubbleInfo();
+      
       await S.set(lastReplyAtKey(tid), ts);
-      await S.set(lastIncomingHashKey(tid), hash);
+      await S.set(lastIncomingHashKey(tid), newBubbleHash);
       await S.set(lastSentHashKey(tid), thisHash);
-      lastBubbleHashMem.set(tid, djb2(`out|${reply}|#${ts}`));
-      log("[reply] enviado", tid);
+      await S.set(lastSentContentKey(tid), reply);
+      
+      lastBubbleHashMem.set(tid, newBubbleHash);
+      
+      // ✅ CRÍTICO: Durante este período, el MutationObserver NO procesará NADA
+      const silenceEnd = now() + 8000; // 8 segundos de silencio TOTAL (Facebook puede tardar 5+ segundos en renderizar)
+      threadSilenceUntil.set(tid, silenceEnd);
+      
+      log("[reply] enviado", tid, "hash:", newBubbleHash);
+      log("[reply] ✅ SILENCE ESTABLECIDO para", tid, "hasta", new Date(silenceEnd).toLocaleTimeString(), "actual:", new Date(now()).toLocaleTimeString());
+      log("[reply] threadSilenceUntil Map size:", threadSilenceUntil.size, "keys:", Array.from(threadSilenceUntil.keys()));
+      
       return { done: true };
     }
     return { done: false, wait: 400 };
@@ -453,25 +538,82 @@
 
   /* ===== Detección de entrantes (observer + fallback activo) ===== */
   const onNewIncomingInActiveChat = async () => {
+    // ✅ PRIMERA LÍNEA DE DEFENSA: Verificar silence INMEDIATAMENTE
+    const silenceValues = Array.from(threadSilenceUntil.values());
+    const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
+    
+    if (anySilence) {
+      const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
+      log("[active-chat] ⛔ EN SILENCE, abortando detección. Activos:", activeSilences);
+      return;
+    }
+    
     const tid = getCurrentThreadIdFromURL() || "unknown";
+    
+    // ✅ Evitar procesamiento muy rápido
+    if (now() - lastBubbleDetectionAt < CFG.BUBBLE_DETECTION_COOLDOWN_MS) {
+      return;
+    }
+    lastBubbleDetectionAt = now();
+    
     const { text, dir, hash } = getLastBubbleInfo();
     if (!text || isLikelySystem(text)) return;
 
-    // Evitar disparar por nuestro propio último mensaje (por contenido)
-    const incomingPlain = djb2(text);
-    const lastSentPlain = await S.get(lastSentHashKey(tid), "");
-    if (String(lastSentPlain) === String(incomingPlain)) return;
+    // ✅ CRÍTICO: Verificar si el texto coincide con CUALQUIERA de nuestras respuestas configuradas
+    // Esto evita que el bot responda a sus propias respuestas
+    
+    // Función para normalizar: quitar emojis, caracteres especiales, espacios extras
+    const normalize = (str) => {
+      return str
+        .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Emojis emoticones
+        .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Símbolos y pictogramas
+        .replace(/[\u{1F680}-\u{1F6FF}]/gu, '') // Transporte y símbolos de mapa
+        .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '') // Banderas
+        .replace(/[\u{2600}-\u{26FF}]/gu, '')   // Símbolos varios
+        .replace(/[\u{2700}-\u{27BF}]/gu, '')   // Dingbats
+        .replace(/[\u{FE00}-\u{FE0F}]/gu, '')   // Selectores de variación
+        .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // Símbolos suplementarios y pictogramas
+        .replace(/[^\w\sáéíóúñü]/gi, '')        // Quitar todo excepto letras, números, espacios
+        .replace(/\s+/g, ' ')                   // Espacios múltiples a uno solo
+        .trim()
+        .toLowerCase();
+    };
+    
+    const textNormalized = normalize(text);
+    
+    log("[active-chat] Verificando contra", compiledRules.length, "reglas. Text normalizado:", textNormalized.substring(0, 50));
+    
+    for (const rule of compiledRules) {
+      const replyNormalized = normalize(rule.reply || '');
+      const checkPart = replyNormalized.substring(0, Math.min(25, replyNormalized.length));
+      
+      if (replyNormalized && checkPart.length > 10 && textNormalized.includes(checkPart)) {
+        log("[active-chat] ⛔ COINCIDE! Ignorando. Reply:", checkPart);
+        return;
+      }
+    }
 
-    // En chats normales exigimos dir === "in"; en Marketplace somos más flexibles
-    if (!isMarketplacePath() && dir !== "in") return;
+    // Verificación adicional: si es "out" lo ignoramos siempre
+    if (dir === "out") {
+      log("[active-chat] mensaje es 'out', ignorando");
+      return;
+    }
+
+    // En chats normales exigimos dir === "in"
+    if (!isMarketplacePath() && dir !== "in") {
+      return;
+    }
 
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     const lastMem = lastBubbleHashMem.get(tid) || "";
 
-    if (hash === lastMem || String(lastIn) === String(hash)) return; // ya visto/atendido
+    if (hash === lastMem || String(lastIn) === String(hash)) {
+      return; // ya visto/atendido
+    }
     lastBubbleHashMem.set(tid, hash);
 
-    // Importante: no navegamos; solo encolamos TID (anti-roaming)
+    // Encolar
+    log("[active-chat] Nuevo mensaje entrante, encolando:", tid, "hash:", hash, "text:", text.substring(0, 30));
     enqueueActiveTid(tid);
   };
 
@@ -496,7 +638,16 @@
       setTimeout(async () => {
         moQueued = false;
         if (!enabled) return;
-        if (now() < threadSilenceUntil) return;
+        
+        // ✅ CRÍTICO: NO procesar NADA si CUALQUIER hilo está en silence
+        const silenceValues = Array.from(threadSilenceUntil.values());
+        const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
+        
+        if (anySilence) {
+          const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
+          log("[observer] EN SILENCE, no procesando. Activos:", activeSilences);
+          return;
+        }
 
         await onNewIncomingInActiveChat();
       }, 70);
@@ -544,7 +695,19 @@
   const onThreadChanged = async (newTid) => {
     const tid = newTid || "unknown";
     currentTid = tid;
-    threadSilenceUntil = now() + CFG.THREAD_LOAD_SILENCE_MS;
+    
+    // ✅ MEJORADO: Solo establecer silence si no hay uno más largo ya activo
+    const existingSilence = threadSilenceUntil.get(tid) || 0;
+    const newSilence = now() + CFG.THREAD_LOAD_SILENCE_MS;
+    
+    if (now() >= existingSilence) {
+      // Solo establecer nuevo silence si el existente ya expiró
+      threadSilenceUntil.set(tid, newSilence);
+      log("[thread] Estableciendo silence de", CFG.THREAD_LOAD_SILENCE_MS, "ms para", tid);
+    } else {
+      log("[thread] Manteniendo silence existente hasta", new Date(existingSilence).toLocaleTimeString());
+    }
+    
     const base = getBaselineHash();
 
     if (pendingAutoOpenTid && pendingAutoOpenTid === tid) {
@@ -577,10 +740,20 @@
   const tick = async () => {
     if (!enabled) return;
 
-    // 1) Fallback: si estás en un chat y entra algo, encola TID (no navegamos)
+    // ✅ CRÍTICO: Si CUALQUIER hilo está en silence, NO procesar NADA
+    const silenceValues = Array.from(threadSilenceUntil.values());
+    const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
+    
+    if (anySilence) {
+      const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
+      log("[tick] EN SILENCE, no procesando. Activos:", activeSilences);
+      return; // Silencio total - no procesar nada
+    }
+
+    // 1) Fallback: si estás en un chat y entra algo, encola TID
     await onNewIncomingInActiveChat();
 
-    // 2) Watcher delta de “no leídos”: solo encola TID cuando aparecen nuevos no leídos
+    // 2) Watcher delta de "no leídos": solo encola TID cuando aparecen nuevos no leídos
     const unreadTids = listUnreadTidsFromSidebar();
     for (const tid of unreadTids) {
       if (!unreadSeen.has(tid)) enqueueTidOnce(tid);
@@ -634,8 +807,17 @@
 
     bindUI();
 
-    // ✅ Primero fija baseline/lastIncoming del hilo actual
-    await onThreadChanged(getCurrentThreadIdFromURL());
+    // ✅ CRÍTICO: Establecer silence period inicial ANTES de cualquier cosa
+    const initialTid = getCurrentThreadIdFromURL() || "unknown";
+    threadSilenceUntil.set(initialTid, now() + 8000); // 8 segundos de silence inicial (más largo)
+    
+    log("[init] Estableciendo silence inicial de 8s para", initialTid);
+
+    // ✅ Esperar un poco para que Facebook cargue los mensajes en el DOM
+    await sleep(1000);
+
+    // ✅ Ahora sí fija baseline/lastIncoming del hilo actual
+    await onThreadChanged(initialTid);
 
     // ✅ Luego engancha observer y watchers
     attachObserver();
@@ -643,7 +825,7 @@
     watchURL();
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo (anti-roaming, solo navega con cola). Hilo:", currentTid, "Marketplace:", isMarketplacePath());
+    log("Bot listo v2.9.3 (FIX: carga inicial + respuesta duplicada). Hilo:", currentTid, "Baseline establecida");
   };
 
   if (document.readyState === "loading") {
