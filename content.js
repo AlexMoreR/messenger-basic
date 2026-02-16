@@ -537,8 +537,8 @@
 
   /* ===== Cambio de hilo / URL ===== */
   const getBaselineHash = () => {
-    const { dir, text, count } = getLastBubbleInfo();
-    return djb2(`${dir}|${text}|#${count}`);
+    const { hash } = getLastBubbleInfo();
+    return hash || "0";
   };
 
   const onThreadChanged = async (newTid) => {
@@ -549,6 +549,8 @@
 
     if (pendingAutoOpenTid && pendingAutoOpenTid === tid) {
       await S.set(baselineHashKey(tid), base);
+      await S.set(lastIncomingHashKey(tid), base); // ✅ evita disparo inmediato
+      lastBubbleHashMem.set(tid, base);            // ✅ coherencia memoria
       setTimeout(() => { processQueueSoon(); }, CFG.THREAD_LOAD_SILENCE_MS + 60);
       log("[thread] abierto (auto)", tid, "baseline:", base);
       pendingAutoOpenTid = null;
@@ -631,11 +633,14 @@
     compiledRules = compileAll(rules);
 
     bindUI();
+
+    // ✅ Primero fija baseline/lastIncoming del hilo actual
+    await onThreadChanged(getCurrentThreadIdFromURL());
+
+    // ✅ Luego engancha observer y watchers
     attachObserver();
     watchdogObserver();
     watchURL();
-
-    await onThreadChanged(getCurrentThreadIdFromURL());
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
     log("Bot listo (anti-roaming, solo navega con cola). Hilo:", currentTid, "Marketplace:", isMarketplacePath());
