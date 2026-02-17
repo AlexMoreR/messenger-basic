@@ -1,4 +1,4 @@
-// ui.js — Panel visual de reglas para VZ-Bot
+// ui.js - Panel visual de reglas para VZ-Bot
 // - Sin dependencias externas
 // - Guarda UI propia en __vz_rules_ui y publica reglas compiladas en __vz_rules_json
 // - Compatible con content.js existente (usa window.VZUI.injectTopBar / openRulesModal)
@@ -47,46 +47,60 @@
   /* =========================
      Estilos
   ========================== */
-  cssOnce("vz-ui-simple-css", `
-  #vz-topbar{all:initial}
-  .vz-wrap{position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.45); backdrop-filter: blur(2px);}
-  .vz-dialog{width:min(1000px,96vw); max-height:92vh; background:#0f0f12; color:#fff; border:1px solid rgba(255,255,255,.08); border-radius:14px; box-shadow:0 24px 80px rgba(0,0,0,.35); display:flex; flex-direction:column;}
-  .vz-hd{display:flex; gap:10px; align-items:center; padding:12px 14px; border-bottom:1px solid rgba(255,255,255,.08);}
-  .vz-ttl{font:600 15px/1.2 system-ui, -apple-system, Segoe UI, Roboto}
-  .vz-sp{flex:1}
-  .vz-btn{background:#1f2937; border:none; color:#fff; border-radius:10px; padding:8px 10px; font:500 13px system-ui; cursor:pointer}
-  .vz-btn:hover{filter:brightness(1.1)}
-  .vz-btn.pr{background:#22c55e}
-  .vz-btn.ghost{background:#374151}
-  .vz-btn.icon{padding:6px; width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center; border-radius:8px}
-  .vz-btn.icon svg{width:16px; height:16px; display:block}
-  .vz-icon{fill:#fff; opacity:.9}
-  .vz-icon.warn{fill:#fff}
-  .vz-bd{display:grid; grid-template-columns:280px 1fr; gap:0; min-height:0}
-  .vz-colL{border-right:1px solid rgba(255,255,255,.06); padding:12px; display:flex; flex-direction:column; gap:10px; min-height:0}
-  .vz-colR{padding:12px; min-height:0; display:flex; flex-direction:column; gap:10px}
-  .vz-field{display:flex; flex-direction:column; gap:6px}
-  .vz-label{font:600 12px system-ui; opacity:.9}
-  .vz-input,.vz-select,.vz-textarea{background:#17171b; border:1px solid rgba(255,255,255,.12); color:#fff; border-radius:10px; padding:8px 10px; font:13px system-ui; outline:none}
-  .vz-input:focus,.vz-select:focus,.vz-textarea:focus{border-color:#7c3aed}
-  .vz-textarea{min-height:90px; resize:vertical}
-  .vz-list{display:flex; flex-direction:column; gap:10px; overflow:auto; min-height:0}
-  .vz-card{background:#121216; border:1px solid rgba(255,255,255,.08); border-radius:12px; padding:10px; display:flex; gap:10px}
-  .vz-cardTitle{font:600 12px system-ui; opacity:.8}
-  .vz-row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
-  .vz-templateRow{display:flex; gap:6px; flex-wrap:wrap}
-  .vz-reorder{display:flex; gap:4px}
-  .vz-note{font:12px system-ui; opacity:.75}
-  .vz-tester{background:#0d0d11; border:1px dashed rgba(255,255,255,.12); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:8px}
-  .vz-hit{border-left:3px solid #22c55e; padding-left:8px}
-  .vz-nohit{border-left:3px solid #ef4444; padding-left:8px}
-  .vz-chip{display:inline-flex; gap:6px; align-items:center; background:#1f2937; border:1px solid rgba(255,255,255,.08); color:#fff; padding:6px 10px; border-radius:999px; font:12px system-ui; cursor:pointer}
-  .vz-newpulse{outline:2px solid #22c55e; box-shadow:0 0 0 0 rgba(34,197,94,.6); animation:vzPulse 1.1s ease-out 2}
-  @keyframes vzPulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.6)}100%{box-shadow:0 0 0 14px rgba(34,197,94,0)}}
+  cssOnce("vz-ui-saas-css", `
+  .vz2-wrap{position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:radial-gradient(1200px 700px at 90% -10%, rgba(56,189,248,.18), transparent),rgba(2,6,23,.72)}
+  .vz2-dialog{width:min(920px,96vw); max-height:92vh; display:flex; flex-direction:column; background:linear-gradient(170deg,#0b1220,#0a1426); border:1px solid rgba(148,163,184,.28); border-radius:16px; color:#e2e8f0; box-shadow:0 28px 90px rgba(0,0,0,.55); animation:vz2FadeUp .2s ease-out}
+  .vz2-hd{display:flex; align-items:center; gap:10px; padding:14px; border-bottom:1px solid rgba(148,163,184,.2)}
+  .vz2-title{font:700 16px/1.2 system-ui; color:#f8fafc; display:flex; align-items:center; gap:8px}
+  .vz2-titleIcon{width:18px; height:18px; display:inline-flex; align-items:center; justify-content:center; border-radius:6px; background:#0b2540; color:#7dd3fc; border:1px solid rgba(125,211,252,.35); font:700 12px/1 system-ui}
+  .vz2-sub{font:12px/1.2 system-ui; opacity:.8}
+  .vz2-sp{flex:1}
+  .vz2-btn{background:#1e293b; color:#f8fafc; border:1px solid rgba(148,163,184,.28); border-radius:10px; padding:8px 10px; font:600 13px system-ui; cursor:pointer}
+  .vz2-btn:hover{filter:brightness(1.1)}
+  .vz2-btn.pr{background:#059669}
+  .vz2-btn.info{background:#0e7490}
+  .vz2-btn.warn{background:#b91c1c}
+  .vz2-bd{padding:14px; overflow:auto; min-height:0}
+  .vz2-grid{display:flex; flex-direction:column; gap:12px; align-items:center}
+  .vz2-card{background:#0f172a; border:1px solid rgba(148,163,184,.22); border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:10px; width:min(500px,100%)}
+  .vz2-card{position:relative; cursor:pointer; transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease; animation:vz2CardIn .24s ease both; overflow:visible}
+  .vz2-card.menu-open{z-index:40}
+  .vz2-card:hover{border-color:rgba(56,189,248,.55); box-shadow:0 0 0 1px rgba(56,189,248,.18) inset; transform:translateY(-1px)}
+  .vz2-cardHead{display:flex; align-items:center; gap:8px; justify-content:space-between}
+  .vz2-topMeta{display:flex; align-items:center; gap:6px; justify-content:flex-end; flex:0 0 auto}
+  .vz2-name{font:700 14px/1.2 system-ui; color:#f8fafc}
+  .vz2-preview{font:12px/1.3 system-ui; color:#94a3b8; margin-top:2px}
+  .vz2-chips{display:flex; gap:6px; flex-wrap:wrap}
+  .vz2-chip{font:600 11px/1.1 system-ui; border-radius:999px; padding:5px 8px; border:1px solid rgba(148,163,184,.3); background:#1e293b}
+  .vz2-chip.on{background:#065f46; border-color:#10b981}
+  .vz2-chip.off{background:#3f3f46; border-color:#71717a}
+  .vz2-row{display:flex; gap:8px; align-items:center}
+  .vz2-menuBtn{width:30px; height:30px; border-radius:8px; background:#111827; border:1px solid rgba(148,163,184,.35); color:#cbd5e1; cursor:pointer}
+  .vz2-menu{position:absolute; right:8px; top:46px; min-width:150px; background:#0b1220; border:1px solid rgba(148,163,184,.35); border-radius:10px; padding:6px; display:none; flex-direction:column; gap:4px; z-index:60; transform-origin:top right}
+  .vz2-menu.open{display:flex; animation:vz2Pop .14s ease-out}
+  .vz2-menuItem{background:#111827; border:1px solid rgba(148,163,184,.2); color:#e2e8f0; border-radius:8px; padding:8px 10px; font:600 12px system-ui; text-align:left; cursor:pointer}
+  .vz2-menuItem:hover{filter:brightness(1.08)}
+  .vz2-menuItem.warn{background:#3f1d1d; border-color:#7f1d1d}
+  .vz2-empty{padding:20px; text-align:center; border:1px dashed rgba(148,163,184,.3); border-radius:12px; color:#94a3b8}
+
+  .vz2-modal{position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,.62)}
+  .vz2-panel{width:min(620px,94vw); max-height:90vh; overflow:auto; background:#0f172a; border:1px solid rgba(148,163,184,.32); border-radius:16px; box-shadow:0 24px 80px rgba(0,0,0,.55); animation:vz2Pop .18s ease-out}
+  .vz2-helpFrame{width:min(620px,92vw); aspect-ratio:16/9; border:0; border-radius:12px; background:#000}
+  .vz2-phd{display:flex; align-items:center; gap:10px; padding:14px; border-bottom:1px solid rgba(148,163,184,.2)}
+  .vz2-pbd{padding:14px; display:flex; flex-direction:column; gap:12px}
+  .vz2-field{display:flex; flex-direction:column; gap:6px}
+  .vz2-label{font:600 12px system-ui; color:#cbd5e1}
+  .vz2-input,.vz2-select,.vz2-ta{background:#0b1220; color:#e2e8f0; border:1px solid rgba(148,163,184,.3); border-radius:10px; padding:9px 10px; font:13px system-ui; outline:none}
+  .vz2-input:focus,.vz2-select:focus,.vz2-ta:focus{border-color:#38bdf8}
+  .vz2-ta{min-height:120px; resize:vertical}
+  .vz2-actions{display:flex; gap:8px; justify-content:flex-end; padding-top:4px}
+  @keyframes vz2FadeUp{from{opacity:0; transform:translateY(10px)}to{opacity:1; transform:translateY(0)}}
+  @keyframes vz2Pop{from{opacity:0; transform:translateY(-6px) scale(.98)}to{opacity:1; transform:translateY(0) scale(1)}}
+  @keyframes vz2CardIn{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:translateY(0)}}
   `);
 
   /* =========================
-     Estado y conversión
+     Estado y conversion
   ========================== */
   const UI_KEY = "__vz_rules_ui";
 
@@ -97,12 +111,12 @@
   let panelOpen = false;
 
   const templates = [
-    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"^(hola|buen[oa]s|saludos)\\b", text:"", reply:"¡Hola! 😊\n\nCuéntame un poco más para ayudarte." } },
-    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"precio|valor|cu[aá]nto cuesta|costo", text:"", reply:"Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" } },
-    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",      rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", text:"", reply:"Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" } },
-    { label:"Envíos",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"env[ií]o|entrega|domicilio", text:"", reply:"¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" } },
-    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", text:"", reply:"¡Mucho gusto! 😊 ¿En qué te ayudo?" } },
-    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", rawRegex:"", text:"", reply:"Gracias por tu mensaje 🙌\n\nEn un momento un asesor revisará tu consulta." } },
+    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"^(hola|buen[oa]s|saludos)\\b", text:"", reply:"Â¡Hola! ðŸ˜Š\n\nCuÃ©ntame un poco mÃ¡s para ayudarte." } },
+    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"precio|valor|cu[aÃ¡]nto cuesta|costo", text:"", reply:"Nuestros precios varÃ­an segÃºn el producto/servicio.\nÂ¿De quÃ© producto te interesa saber el precio?" } },
+    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",      rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", text:"", reply:"Horario de atenciÃ³n:\nLunâ€“Vie: 8:00â€“18:00\nSÃ¡b: 9:00â€“13:00" } },
+    { label:"EnvÃ­os",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"env[iÃ­]o|entrega|domicilio", text:"", reply:"Â¡SÃ­! Realizamos envÃ­os. Â¿CuÃ¡l es tu ciudad o direcciÃ³n aproximada para cotizar?" } },
+    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"\\b(soy|me llamo)\\s+([a-zÃ¡Ã©Ã­Ã³ÃºÃ±]+)\\b", text:"", reply:"Â¡Mucho gusto! ðŸ˜Š Â¿En quÃ© te ayudo?" } },
+    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", rawRegex:"", text:"", reply:"Gracias por tu mensaje ðŸ™Œ\n\nEn un momento un asesor revisarÃ¡ tu consulta." } },
   ];
 
   // Exporta al motor: modo "Cualquiera" genera [\s\S]+, siempre con flag i
@@ -191,6 +205,7 @@
     /* Header */
     const hd  = document.createElement("div"); hd.className = "vz-hd";
     const ttl = document.createElement("div"); ttl.className = "vz-ttl"; ttl.textContent = "Reglas del chatbot (prioridad de arriba hacia abajo)";
+    const saveHint = document.createElement("span"); saveHint.className = "vz-kbd"; saveHint.textContent = "Ctrl/Cmd + S";
     const sp  = document.createElement("div"); sp.className = "vz-sp";
 
     const btnClose = mkBtn("Cerrar", "ghost");
@@ -214,7 +229,7 @@
       flash(btnPublish, "Guardado");
     };
 
-    hd.append(ttl, sp, btnExport, btnPublish, btnClose);
+    hd.append(ttl, saveHint, sp, btnExport, btnPublish, btnClose);
 
     /* Body (2 columnas) */
     const bd  = document.createElement("div"); bd.className = "vz-bd";
@@ -222,7 +237,7 @@
     const R   = document.createElement("div"); R.className   = "vz-colR";
 
     // Izquierda: buscar + plantillas + tester
-    const searchField = field("Buscar", input({placeholder:"filtra por texto o respuesta…"}));
+    const searchField = field("Buscar", input({placeholder:"filtra por texto o respuesta..."}));
     const search = searchField.querySelector("input");
     search.oninput = () => { filterText = String(search.value||"").toLowerCase().trim(); renderList(); };
 
@@ -237,9 +252,10 @@
       addRow.append(b);
     }
 
+    const quick = quickBuilder();
     const tester = testerBox();
 
-    L.append(searchField, addRow, tester);
+    L.append(searchField, addRow, quick, tester);
 
     // Derecha: lista
     const listWrap = document.createElement("div"); listWrap.className = "vz-list";
@@ -252,7 +268,14 @@
 
     // Cerrar por fondo / ESC
     wrap.addEventListener("click", (e)=>{ if (e.target === wrap){ wrap.remove(); panelOpen=false; }});
-    wrap.addEventListener("keydown", (e)=>{ if (e.key==="Escape"){ e.preventDefault(); wrap.remove(); panelOpen=false; }});
+    wrap.addEventListener("keydown", (e)=>{
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s"){
+        e.preventDefault();
+        btnPublish.click();
+        return;
+      }
+      if (e.key==="Escape"){ e.preventDefault(); wrap.remove(); panelOpen=false; }
+    });
 
     // Carga
     (async () => {
@@ -333,7 +356,7 @@
 
       const title = document.createElement("div"); title.className="vz-cardTitle";
       title.textContent = uiRules[i].mode === "Regex"
-        ? "Coincidencia: Expresión regular"
+        ? "Coincidencia: ExpresiÃ³n regular"
         : `Coincidencia: ${uiRules[i].mode}`;
 
       const row1 = document.createElement("div"); row1.className = "vz-row";
@@ -342,15 +365,15 @@
       mode.onchange = () => {
         uiRules[i].mode = mode.value;
         title.textContent = uiRules[i].mode === "Regex"
-          ? "Coincidencia: Expresión regular"
+          ? "Coincidencia: ExpresiÃ³n regular"
           : `Coincidencia: ${uiRules[i].mode}`;
         saveDraft(); syncInputs();
       };
 
-      const txt = input({placeholder:"texto a buscar…"}); txt.value = uiRules[i].text || "";
+      const txt = input({placeholder:"texto a buscar..."}); txt.value = uiRules[i].text || "";
       txt.oninput = () => { uiRules[i].text = txt.value; saveDraft(); };
 
-      const rx = input({placeholder:"expresión regular…"}); rx.value = uiRules[i].rawRegex || "";
+      const rx = input({placeholder:"expresiÃ³n regular..."}); rx.value = uiRules[i].rawRegex || "";
       rx.oninput = () => { uiRules[i].rawRegex = rx.value; saveDraft(); };
 
       const replyField = field("Respuesta", textarea());
@@ -372,7 +395,7 @@
 
       const del = mkIconBtn(svgTrash(), "Eliminar", "#ef4444");
       del.onclick = () => {
-        if (confirm("¿Eliminar esta regla?")){
+        if (confirm("Â¿Eliminar esta regla?")){
           uiRules.splice(i,1);
           saveDraft(); renderList();
         }
@@ -420,8 +443,8 @@
 
     function testerBox(){
       const box = document.createElement("div"); box.className="vz-tester";
-      const h = document.createElement("div"); h.className="vz-label"; h.textContent="Probador rápido";
-      const inp = input({placeholder:"Escribe un mensaje entrante (simulado) y verás qué regla coincide primero…"});
+      const h = document.createElement("div"); h.className="vz-label"; h.textContent="Probador rÃ¡pido";
+      const inp = input({placeholder:"Escribe un mensaje entrante (simulado) y verÃ¡s quÃ© regla coincide primero..."});
       const note = document.createElement("div"); note.className="vz-note"; note.textContent = "La primera coincidencia (arriba) es la que se usa. Ajusta el orden con los chevrons.";
 
       const out = document.createElement("div"); out.className="vz-note";
@@ -439,7 +462,7 @@
         }
         if (matched){
           out.className = "vz-note vz-hit";
-          out.innerHTML = `✔ Coincide la <b>regla #${matched.idx+1}</b>. Respondería:<br><pre style="white-space:pre-wrap;margin:6px 0 0">${escapeHtml(matched.rule.reply)}</pre>`;
+          out.innerHTML = `âœ” Coincide la <b>regla #${matched.idx+1}</b>. ResponderÃ­a:<br><pre style="white-space:pre-wrap;margin:6px 0 0">${escapeHtml(matched.rule.reply)}</pre>`;
           const card = listWrap.children[matched.idx];
           if (card) {
             card.classList.add("vz-newpulse");
@@ -448,12 +471,51 @@
           }
         } else {
           out.className = "vz-note vz-nohit";
-          out.textContent = "✖ Ninguna regla coincide.";
+          out.textContent = "âœ– Ninguna regla coincide.";
         }
       }
 
       inp.oninput = runTest;
       box.append(h, inp, note, out);
+      return box;
+    }
+
+    function quickBuilder(){
+      const box = document.createElement("div"); box.className = "vz-quick";
+      const h = document.createElement("div"); h.className = "vz-label"; h.textContent = "Crear regla rÃ¡pida";
+
+      const mode = select(["Contiene","Igual a","Empieza","Termina","Regex","Cualquiera"], "Contiene");
+      const trigger = input({placeholder:"Disparador (ej: precio, horario, hola)"});
+      const reply = textarea();
+      reply.placeholder = "Respuesta automÃ¡tica...";
+
+      const row = document.createElement("div"); row.className = "vz-row";
+      const add = mkBtn("Agregar arriba", "pr");
+      const clear = mkBtn("Limpiar", "ghost");
+
+      clear.onclick = () => {
+        mode.value = "Contiene";
+        trigger.value = "";
+        reply.value = "";
+      };
+
+      add.onclick = () => {
+        const m = mode.value;
+        const trig = String(trigger.value || "").trim();
+        const rep = String(reply.value || "").trim();
+        if (!rep) { alert("Escribe una respuesta."); return; }
+        if (m !== "Cualquiera" && !trig) { alert("Escribe un disparador."); return; }
+        addRule({
+          enabled: true,
+          mode: m,
+          text: m === "Regex" ? "" : trig,
+          rawRegex: m === "Regex" ? trig : "",
+          reply: rep
+        });
+      };
+
+      row.append(label("Modo"), mode, add, clear);
+      box.append(h, row, trigger, reply);
       return box;
     }
 
@@ -536,7 +598,7 @@
     }
     function spacer(){ const s = document.createElement("span"); s.style.flex="0 0 8px"; return s; }
     function flash(btn, txt){
-      const old = btn.textContent; btn.textContent = "✓ " + (txt||"OK"); btn.disabled = true;
+      const old = btn.textContent; btn.textContent = "âœ“ " + (txt||"OK"); btn.disabled = true;
       setTimeout(()=>{ btn.textContent = old; btn.disabled = false; }, 900);
     }
     function escapeHtml(s){
@@ -545,7 +607,7 @@
   }
 
   /* =========================
-     API pública para content.js
+     API pÃºblica para content.js
   ========================== */
   function injectTopBar({ getEnabled, setEnabled, onOpenRules }){
     if (Q("#vz-topbar")) return;
@@ -600,9 +662,311 @@
     document.documentElement.append(wrap);
   }
 
+  function openRulesPanelV2({ loadRules, saveRules }){
+    if (panelOpen) return;
+    panelOpen = true;
+    Q("#vz2-root")?.remove();
+
+    const wrap = document.createElement("div");
+    wrap.id = "vz2-root";
+    wrap.className = "vz2-wrap";
+
+    const dlg = document.createElement("div");
+    dlg.className = "vz2-dialog";
+
+    const hd = document.createElement("div");
+    hd.className = "vz2-hd";
+    hd.innerHTML = `
+      <div>
+        <div class="vz2-title"><span class="vz2-titleIcon">âš™</span>Gestion de reglas</div>
+      </div>
+      <div class="vz2-sp"></div>
+    `;
+
+    const mkBtn = (label, cls="") => {
+      const b = document.createElement("button");
+      b.className = "vz2-btn" + (cls ? ` ${cls}` : "");
+      b.textContent = label;
+      return b;
+    };
+    const esc = (s) => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+    const btnNew = mkBtn("Nueva regla", "pr");
+    const btnHelp = mkBtn("Ayuda", "info");
+    const btnClose = mkBtn("Cerrar");
+    const btnExport = mkBtn("Exportar");
+    hd.append(btnNew, btnExport, btnHelp, btnClose);
+
+    const bd = document.createElement("div");
+    bd.className = "vz2-bd";
+    const grid = document.createElement("div");
+    grid.className = "vz2-grid";
+    bd.append(grid);
+
+    dlg.append(hd, bd);
+    wrap.append(dlg);
+    document.documentElement.append(wrap);
+
+    const closePanel = () => { wrap.remove(); panelOpen = false; };
+    btnClose.onclick = closePanel;
+    wrap.addEventListener("click", (e)=>{ if (e.target === wrap) closePanel(); });
+    document.addEventListener("click", (e) => {
+      if (!Q("#vz2-root")) return;
+      if (!e.target.closest(".vz2-menu") && !e.target.closest(".vz2-menuBtn")) {
+        QA(".vz2-menu.open", wrap).forEach(m => m.classList.remove("open"));
+      }
+    });
+    wrap.addEventListener("keydown", (e)=>{
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s"){
+        e.preventDefault();
+        publishRules();
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        const m = Q(".vz2-modal", wrap);
+        if (m) m.remove(); else closePanel();
+      }
+    });
+
+    const summarize = (r, i) => {
+      const nm = String(r.name || "").trim() || `Regla ${i + 1}`;
+      const preview = r.mode === "Regex" ? String(r.rawRegex || "") : String(r.text || "");
+      return { nm, preview };
+    };
+
+    const saveDraft = async () => { await S.set(UI_KEY, uiRules); };
+    const publishRules = async () => {
+      const compiled = compileForEngine(uiRules);
+      await saveRules(JSON.stringify(compiled, null, 2));
+      await saveDraft();
+    };
+
+    btnExport.onclick = async () => {
+      const compiled = compileForEngine(uiRules);
+      const blob = new Blob([JSON.stringify(compiled, null, 2)], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `vz-rules-${Date.now()}.json`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 5000);
+    };
+
+    btnNew.onclick = () => {
+      uiRules.push({ name:"", enabled:true, mode:"Contiene", text:"", rawRegex:"", reply:"" });
+      openEditor(uiRules.length - 1, true);
+    };
+
+    btnHelp.onclick = () => {
+      Q(".vz2-modal", wrap)?.remove();
+      const help = document.createElement("div");
+      help.className = "vz2-modal";
+      help.innerHTML = `
+        <div class="vz2-panel">
+          <div class="vz2-phd">
+            <div class="vz2-title"><span class="vz2-titleIcon">?</span>Ayuda</div>
+            <div class="vz2-sp"></div>
+            <button class="vz2-btn" data-close-help>Cerrar</button>
+          </div>
+          <div class="vz2-pbd" style="align-items:center">
+            <iframe class="vz2-helpFrame" src="https://www.youtube.com/embed/M7lc1UVf-VE" title="Ayuda reglas" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+          </div>
+        </div>
+      `;
+      Q("[data-close-help]", help).onclick = () => help.remove();
+      help.addEventListener("click", (e) => { if (e.target === help) help.remove(); });
+      wrap.append(help);
+    };
+
+    const render = () => {
+      grid.innerHTML = "";
+      if (!uiRules.length) {
+        const e = document.createElement("div");
+        e.className = "vz2-empty";
+        e.textContent = "No hay reglas. Crea una con 'Nueva regla'.";
+        grid.append(e);
+        return;
+      }
+
+      uiRules.forEach((r, i) => {
+        const s = summarize(r, i);
+        const card = document.createElement("div");
+        card.className = "vz2-card";
+        card.onclick = (e) => {
+          if (e.target.closest(".vz2-menuBtn") || e.target.closest(".vz2-menu")) return;
+          openEditor(i, false);
+        };
+        card.innerHTML = `
+          <div class="vz2-cardHead">
+            <div class="vz2-name">${esc(s.nm)}</div>
+            <div class="vz2-topMeta">
+              <span class="vz2-chip ${r.enabled ? "on" : "off"}">${r.enabled ? "Activo" : "Inactivo"}</span>
+              <span class="vz2-chip">${esc(r.mode || "Contiene")}</span>
+              <button class="vz2-menuBtn" title="Acciones" aria-label="Acciones">â‹®</button>
+            </div>
+          </div>
+          <div class="vz2-preview">${esc(s.preview || "(sin condicion)")}</div>
+          <div class="vz2-menu">
+            <button class="vz2-menuItem" data-action="toggle">${r.enabled ? "Desactivar" : "Activar"}</button>
+            <button class="vz2-menuItem warn" data-action="delete">Eliminar</button>
+          </div>
+        `;
+
+        const menuBtn = Q(".vz2-menuBtn", card);
+        const menu = Q(".vz2-menu", card);
+        const toggleBtn = Q('[data-action="toggle"]', card);
+        const deleteBtn = Q('[data-action="delete"]', card);
+
+        menuBtn.onclick = (e) => {
+          e.stopPropagation();
+          QA(".vz2-menu.open", grid).forEach(m => {
+            if (m !== menu) {
+              m.classList.remove("open");
+              m.closest(".vz2-card")?.classList.remove("menu-open");
+            }
+          });
+          menu.classList.toggle("open");
+          card.classList.toggle("menu-open", menu.classList.contains("open"));
+        };
+
+        toggleBtn.onclick = async (e) => {
+          e.stopPropagation();
+          uiRules[i].enabled = !uiRules[i].enabled;
+          await publishRules();
+          render();
+        };
+
+        deleteBtn.onclick = async (e) => {
+          e.stopPropagation();
+          if (!confirm("Eliminar esta regla?")) return;
+          uiRules.splice(i, 1);
+          await publishRules();
+          render();
+        };
+
+        card.addEventListener("mouseleave", () => menu.classList.remove("open"));
+        card.addEventListener("mouseleave", () => card.classList.remove("menu-open"));
+        grid.append(card);
+      });
+    };
+
+    const openEditor = (idx, isNew) => {
+      Q(".vz2-modal", wrap)?.remove();
+      const r = uiRules[idx];
+      const modal = document.createElement("div");
+      modal.className = "vz2-modal";
+      modal.innerHTML = `
+        <div class="vz2-panel">
+          <div class="vz2-phd">
+            <div class="vz2-title"><span class="vz2-titleIcon">${isNew ? "+" : "âœŽ"}</span>${isNew ? "Nueva regla" : "Editar regla"}</div>
+            <div class="vz2-sp"></div>
+            <button class="vz2-btn" data-close>Cerrar</button>
+          </div>
+          <div class="vz2-pbd">
+            <div class="vz2-field">
+              <div class="vz2-label">Nombre</div>
+              <input class="vz2-input" data-name placeholder="Ej: Regla de saludo">
+            </div>
+            <div class="vz2-row">
+              <input type="checkbox" data-enabled>
+              <span class="vz2-label">Regla activa</span>
+            </div>
+            <div class="vz2-field">
+              <div class="vz2-label">Modo</div>
+              <select class="vz2-select" data-mode>
+                <option>Cualquiera</option><option>Contiene</option><option>Igual a</option>
+                <option>Empieza</option><option>Termina</option><option>Regex</option>
+              </select>
+            </div>
+            <div class="vz2-field">
+              <div class="vz2-label" data-pattern-label>Patron / condicion</div>
+              <input class="vz2-input" data-pattern placeholder="Ej: precio">
+            </div>
+            <div class="vz2-field">
+              <div class="vz2-label">Respuesta automatica</div>
+              <textarea class="vz2-ta" data-reply></textarea>
+            </div>
+            <div class="vz2-actions">
+              <button class="vz2-btn warn" data-delete>Eliminar</button>
+              <button class="vz2-btn" data-cancel>Cancelar</button>
+              <button class="vz2-btn pr" data-save>Guardar</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const name = Q("[data-name]", modal);
+      const enabled = Q("[data-enabled]", modal);
+      const mode = Q("[data-mode]", modal);
+      const pattern = Q("[data-pattern]", modal);
+      const pl = Q("[data-pattern-label]", modal);
+      const reply = Q("[data-reply]", modal);
+
+      name.value = r.name || "";
+      enabled.checked = !!r.enabled;
+      mode.value = r.mode || "Contiene";
+      pattern.value = mode.value === "Regex" ? (r.rawRegex || "") : (r.text || "");
+      reply.value = r.reply || "";
+
+      const sync = () => {
+        pl.textContent = mode.value === "Regex" ? "Expresion regular" : "Patron / condicion";
+        pattern.disabled = mode.value === "Cualquiera";
+      };
+      mode.onchange = sync;
+      sync();
+
+      Q("[data-close]", modal).onclick = () => modal.remove();
+      Q("[data-cancel]", modal).onclick = () => modal.remove();
+      Q("[data-delete]", modal).onclick = async () => {
+        if (!confirm("Eliminar esta regla?")) return;
+        uiRules.splice(idx, 1);
+        await publishRules();
+        render();
+        modal.remove();
+      };
+      Q("[data-save]", modal).onclick = async () => {
+        const m = mode.value;
+        const p = String(pattern.value || "").trim();
+        const rep = String(reply.value || "").trim();
+        if (!rep) { alert("La respuesta no puede estar vacia."); return; }
+        if (m !== "Cualquiera" && !p) { alert("La condicion no puede estar vacia."); return; }
+        uiRules[idx] = {
+          ...uiRules[idx],
+          name: String(name.value || "").trim(),
+          enabled: enabled.checked,
+          mode: m,
+          text: m === "Regex" || m === "Cualquiera" ? "" : p,
+          rawRegex: m === "Regex" ? p : "",
+          reply: rep
+        };
+        await publishRules();
+        render();
+        modal.remove();
+      };
+      modal.addEventListener("click", (e)=>{ if (e.target === modal) modal.remove(); });
+      wrap.append(modal);
+    };
+
+    (async () => {
+      const uiSaved = await S.get(UI_KEY, null);
+      if (Array.isArray(uiSaved) && uiSaved.length) {
+        uiRules = uiSaved;
+      } else {
+        try {
+          const compiled = JSON.parse(await loadRules());
+          uiRules = inflateFromCompiled(compiled);
+        } catch {
+          uiRules = [];
+        }
+      }
+      await saveDraft();
+      render();
+    })();
+  }
+
   async function openRulesModal({ loadRules, saveRules }){
-    openRulesPanel({ loadRules, saveRules });
+    openRulesPanelV2({ loadRules, saveRules });
   }
 
   window.VZUI = { injectTopBar, openRulesModal };
 })();
+
+
