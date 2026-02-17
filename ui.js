@@ -82,6 +82,9 @@
   .vz2-menuItem:hover{filter:brightness(1.08)}
   .vz2-menuItem.warn{background:#3f1d1d; border-color:#7f1d1d}
   .vz2-empty{padding:20px; text-align:center; border:1px dashed rgba(148,163,184,.3); border-radius:12px; color:#94a3b8}
+  .vz2-iconBtn{width:32px; height:32px; border-radius:8px; border:1px solid rgba(148,163,184,.28); background:#111827; color:#e2e8f0; cursor:pointer; font:700 14px/1 system-ui; display:inline-flex; align-items:center; justify-content:center}
+  .vz2-iconBtn:hover{filter:brightness(1.1)}
+  .vz2-iconBtn.warn{background:#3f1d1d; border-color:#7f1d1d}
 
   .vz2-modal{position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center; justify-content:center; background:rgba(2,6,23,.62)}
   .vz2-panel{width:min(620px,94vw); max-height:90vh; overflow:auto; background:#0f172a; border:1px solid rgba(148,163,184,.32); border-radius:16px; box-shadow:0 24px 80px rgba(0,0,0,.55); animation:vz2Pop .18s ease-out}
@@ -94,6 +97,23 @@
   .vz2-input:focus,.vz2-select:focus,.vz2-ta:focus{border-color:#38bdf8}
   .vz2-ta{min-height:120px; resize:vertical}
   .vz2-actions{display:flex; gap:8px; justify-content:flex-end; padding-top:4px}
+  .vz2-trackStats{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px}
+  .vz2-stat{background:#0b1220; border:1px solid rgba(148,163,184,.28); border-radius:10px; padding:10px}
+  .vz2-statK{font:600 11px/1 system-ui; color:#94a3b8}
+  .vz2-statV{font:700 18px/1.1 system-ui; color:#f8fafc; margin-top:6px}
+  .vz2-trackList{display:flex; flex-direction:column; gap:8px}
+  .vz2-trackItem{background:#0b1220; border:1px solid rgba(148,163,184,.28); border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px}
+  .vz2-trackHead{display:flex; justify-content:space-between; align-items:center; gap:8px}
+  .vz2-trackTid{font:600 12px/1.2 system-ui; color:#f8fafc}
+  .vz2-trackMeta{font:12px/1.3 system-ui; color:#94a3b8}
+  .vz2-trackRule{font:600 11px/1.2 system-ui; color:#7dd3fc}
+  .vz2-trackInput{background:#0f172a; color:#e2e8f0; border:1px solid rgba(148,163,184,.3); border-radius:8px; padding:7px 8px; font:12px system-ui}
+  .vz2-trackEmpty{font:12px/1.4 system-ui; color:#94a3b8; border:1px dashed rgba(148,163,184,.28); border-radius:10px; padding:10px}
+  .vz2-trackSection{margin-top:8px}
+  .vz2-trackSection .vz2-label{margin-bottom:4px}
+  .vz2-tabs{display:flex; gap:8px}
+  .vz2-tab{background:#1e293b; color:#cbd5e1; border:1px solid rgba(148,163,184,.25); border-radius:8px; padding:7px 10px; font:600 12px system-ui; cursor:pointer}
+  .vz2-tab.active{background:#0e7490; color:#fff; border-color:#38bdf8}
   @keyframes vz2FadeUp{from{opacity:0; transform:translateY(10px)}to{opacity:1; transform:translateY(0)}}
   @keyframes vz2Pop{from{opacity:0; transform:translateY(-6px) scale(.98)}to{opacity:1; transform:translateY(0) scale(1)}}
   @keyframes vz2CardIn{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:translateY(0)}}
@@ -609,7 +629,7 @@
   /* =========================
      API pÃºblica para content.js
   ========================== */
-  function injectTopBar({ getEnabled, setEnabled, onOpenRules }){
+  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking }){
     if (Q("#vz-topbar")) return;
 
     const wrap = document.createElement("div");
@@ -656,8 +676,10 @@
 
     const btnRules = mkBtn("Reglas", "#7c3aed");
     btnRules.onclick = () => onOpenRules?.();
+    const btnTracking = mkBtn("Seguimiento", "#0e7490");
+    btnTracking.onclick = () => onOpenTracking?.();
 
-    bar.append(status, btnToggle, btnRules);
+    bar.append(status, btnToggle, btnRules, btnTracking);
     wrap.append(bar);
     document.documentElement.append(wrap);
   }
@@ -678,7 +700,7 @@
     hd.className = "vz2-hd";
     hd.innerHTML = `
       <div>
-        <div class="vz2-title"><span class="vz2-titleIcon">âš™</span>Gestion de reglas</div>
+        <div class="vz2-title"><span class="vz2-titleIcon">&#9881;</span>Gestion de reglas</div>
       </div>
       <div class="vz2-sp"></div>
     `;
@@ -800,7 +822,7 @@
             <div class="vz2-topMeta">
               <span class="vz2-chip ${r.enabled ? "on" : "off"}">${r.enabled ? "Activo" : "Inactivo"}</span>
               <span class="vz2-chip">${esc(r.mode || "Contiene")}</span>
-              <button class="vz2-menuBtn" title="Acciones" aria-label="Acciones">â‹®</button>
+              <button class="vz2-menuBtn" title="Acciones" aria-label="Acciones">&#8942;</button>
             </div>
           </div>
           <div class="vz2-preview">${esc(s.preview || "(sin condicion)")}</div>
@@ -856,7 +878,7 @@
       modal.innerHTML = `
         <div class="vz2-panel">
           <div class="vz2-phd">
-            <div class="vz2-title"><span class="vz2-titleIcon">${isNew ? "+" : "âœŽ"}</span>${isNew ? "Nueva regla" : "Editar regla"}</div>
+            <div class="vz2-title"><span class="vz2-titleIcon">${isNew ? "+" : "&#9998;"}</span>${isNew ? "Nueva regla" : "Editar regla"}</div>
             <div class="vz2-sp"></div>
             <button class="vz2-btn" data-close>Cerrar</button>
           </div>
@@ -962,11 +984,224 @@
     })();
   }
 
+  async function openTrackingModal({ loadAnalytics, saveFollowups }){
+    Q("#vz2-track-root")?.remove();
+    const wrap = document.createElement("div");
+    wrap.id = "vz2-track-root";
+    wrap.className = "vz2-modal";
+    wrap.innerHTML = `
+      <div class="vz2-panel">
+        <div class="vz2-phd">
+          <div class="vz2-title"><span class="vz2-titleIcon">#</span>Seguimiento</div>
+          <div class="vz2-sp"></div>
+          <div class="vz2-tabs">
+            <button class="vz2-tab active" data-tab="chats">Chats</button>
+            <button class="vz2-tab" data-tab="followups">Seguimientos</button>
+          </div>
+          <button class="vz2-btn" data-close>Cerrar</button>
+        </div>
+        <div class="vz2-pbd">
+          <div data-view="chats">
+            <div class="vz2-trackStats" data-stats></div>
+            <div class="vz2-field vz2-trackSection">
+              <div class="vz2-label">Reglas mas usadas</div>
+              <div class="vz2-trackList" data-rules></div>
+            </div>
+            <div class="vz2-field vz2-trackSection">
+              <div class="vz2-label">Chats</div>
+              <div class="vz2-trackList" data-threads></div>
+            </div>
+          </div>
+          <div data-view="followups" style="display:none">
+            <div class="vz2-field">
+              <div class="vz2-label">Crear seguimiento global</div>
+              <button class="vz2-btn pr" data-open-add-followup>Nuevo seguimiento</button>
+            </div>
+            <div class="vz2-field vz2-trackSection">
+              <div class="vz2-label">Plantillas de seguimiento (se aplican a todos los chats entrantes)</div>
+              <div class="vz2-trackList" data-followups></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const close = () => wrap.remove();
+    Q("[data-close]", wrap).onclick = close;
+    wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+
+    const esc = (s) => String(s).replace(/[&<>"']/g, (m) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[m]));
+    const fmtTs = (ts) => ts ? new Date(ts).toLocaleString() : "-";
+
+    let activeTab = "chats";
+    const setTab = (tab) => {
+      activeTab = tab;
+      QA("[data-tab]", wrap).forEach((b) => b.classList.toggle("active", b.getAttribute("data-tab") === tab));
+      QA("[data-view]", wrap).forEach((v) => v.style.display = (v.getAttribute("data-view") === tab ? "" : "none"));
+    };
+    QA("[data-tab]", wrap).forEach((b) => {
+      b.onclick = () => setTab(b.getAttribute("data-tab"));
+    });
+
+    const render = async () => {
+      const data = await loadAnalytics();
+      const totals = data?.totals || {};
+      const rules = Array.isArray(data?.rules) ? data.rules : [];
+      const threads = Array.isArray(data?.threads) ? data.threads : [];
+      const followups = Array.isArray(data?.followups) ? data.followups : [];
+
+      Q("[data-stats]", wrap).innerHTML = `
+        <div class="vz2-stat"><div class="vz2-statK">Chats</div><div class="vz2-statV">${totals.chats || 0}</div></div>
+        <div class="vz2-stat"><div class="vz2-statK">Entrantes</div><div class="vz2-statV">${totals.incoming || 0}</div></div>
+        <div class="vz2-stat"><div class="vz2-statK">Respuestas</div><div class="vz2-statV">${totals.replies || 0}</div></div>
+        <div class="vz2-stat"><div class="vz2-statK">Seguimientos</div><div class="vz2-statV">${totals.followups || 0}</div></div>
+      `;
+
+      const rulesBox = Q("[data-rules]", wrap);
+      if (!rules.length) {
+        rulesBox.innerHTML = `<div class="vz2-trackEmpty">Sin datos aun.</div>`;
+      } else {
+        rulesBox.innerHTML = rules.slice(0, 8).map((r) => `
+          <div class="vz2-trackItem">
+            <div class="vz2-trackHead">
+              <div class="vz2-trackTid">${esc(r.label || r.id)}</div>
+              <div class="vz2-trackMeta">${r.count || 0} usos</div>
+            </div>
+            <div class="vz2-trackMeta">Ultimo uso: ${fmtTs(r.lastAt)}</div>
+          </div>
+        `).join("");
+      }
+
+      const threadsBox = Q("[data-threads]", wrap);
+      threadsBox.innerHTML = "";
+      if (!threads.length) {
+        threadsBox.innerHTML = `<div class="vz2-trackEmpty">Aun no hay chats detectados.</div>`;
+      } else {
+        threads.forEach((t) => {
+          const item = document.createElement("div");
+          item.className = "vz2-trackItem";
+          item.innerHTML = `
+            <div class="vz2-trackHead">
+              <div class="vz2-trackTid">${esc(t.tid || "-")}</div>
+              <div class="vz2-trackMeta">${fmtTs(t.lastIncomingAt)}</div>
+            </div>
+            <div class="vz2-trackMeta">Entrantes: ${t.incomingCount || 0} | Respuestas: ${t.replyCount || 0} | Seguimientos: ${t.followupCount || 0}</div>
+            <div class="vz2-trackRule">Ultima regla: ${esc(t.lastRuleLabel || "-")}</div>
+            <div class="vz2-trackMeta">Ultimo seguimiento: ${esc(t.lastFollowupLabel || "-")}</div>
+            <div class="vz2-trackMeta">Ultimo mensaje: ${esc((t.lastIncomingText || "").slice(0, 160))}</div>
+          `;
+          threadsBox.append(item);
+        });
+      }
+
+      const followupsBox = Q("[data-followups]", wrap);
+      followupsBox.innerHTML = "";
+      if (!followups.length) {
+        followupsBox.innerHTML = `<div class="vz2-trackEmpty">Aun no creas seguimientos.</div>`;
+      } else {
+        followups.forEach((f, idx) => {
+          const row = document.createElement("div");
+          row.className = "vz2-trackItem";
+          row.innerHTML = `
+            <div class="vz2-trackHead">
+              <div class="vz2-trackTid">${esc(f.name || `Seguimiento ${idx + 1}`)}</div>
+              <label class="vz2-trackMeta"><input type="checkbox" data-enabled ${f.enabled ? "checked" : ""}> Activo</label>
+            </div>
+            <div class="vz2-row">
+              <input class="vz2-trackInput" data-name value="${esc(f.name || "")}" placeholder="Nombre" style="width:150px">
+              <input class="vz2-trackInput" data-min type="number" min="1" value="${Number(f.delayMin || 5)}" title="Minutos" placeholder="Min" style="width:90px">
+              <input class="vz2-trackInput" data-text value="${esc(f.text || "")}" placeholder="Mensaje" style="flex:1">
+              <button class="vz2-iconBtn" data-save title="Guardar seguimiento" aria-label="Guardar seguimiento">💾</button>
+              <button class="vz2-iconBtn warn" data-del title="Eliminar seguimiento" aria-label="Eliminar seguimiento">🗑</button>
+            </div>
+          `;
+          Q("[data-save]", row).onclick = async () => {
+            const next = [...followups];
+            next[idx] = {
+              ...next[idx],
+              enabled: !!Q("[data-enabled]", row).checked,
+              name: String(Q("[data-name]", row).value || "").trim(),
+              delayMin: Number(Q("[data-min]", row).value || 5),
+              text: String(Q("[data-text]", row).value || "")
+            };
+            await saveFollowups(next);
+            await render();
+          };
+          Q("[data-del]", row).onclick = async () => {
+            const next = followups.filter((_, i) => i !== idx);
+            await saveFollowups(next);
+            await render();
+          };
+          followupsBox.append(row);
+        });
+      }
+    };
+
+    Q("[data-open-add-followup]", wrap).onclick = async () => {
+      const modal = document.createElement("div");
+      modal.className = "vz2-modal";
+      modal.innerHTML = `
+        <div class="vz2-panel" style="max-width:520px">
+          <div class="vz2-phd">
+            <div class="vz2-title"><span class="vz2-titleIcon">+</span>Nuevo seguimiento</div>
+            <div class="vz2-sp"></div>
+            <button class="vz2-btn" data-close-add>Cerrar</button>
+          </div>
+          <div class="vz2-pbd">
+            <div class="vz2-field">
+              <div class="vz2-label">Nombre</div>
+              <input class="vz2-input" data-add-name placeholder="Seguimiento 1">
+            </div>
+            <div class="vz2-field">
+              <div class="vz2-label">Tiempo de espera (minutos)</div>
+              <input class="vz2-input" data-add-min type="number" min="1" value="5" placeholder="5">
+            </div>
+            <div class="vz2-field">
+              <div class="vz2-label">Mensaje</div>
+              <textarea class="vz2-ta" data-add-text placeholder="Mensaje que se enviara automaticamente"></textarea>
+            </div>
+            <div class="vz2-actions">
+              <button class="vz2-btn" data-cancel-add>Cancelar</button>
+              <button class="vz2-btn pr" data-save-add>Guardar</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const closeAdd = () => modal.remove();
+      Q("[data-close-add]", modal).onclick = closeAdd;
+      Q("[data-cancel-add]", modal).onclick = closeAdd;
+      modal.addEventListener("click", (e) => { if (e.target === modal) closeAdd(); });
+
+      Q("[data-save-add]", modal).onclick = async () => {
+        const data = await loadAnalytics();
+        const curr = Array.isArray(data?.followups) ? data.followups : [];
+        const nameInput = String(Q("[data-add-name]", modal).value || "").trim();
+        const name = nameInput || `Seguimiento ${curr.length + 1}`;
+        const delayMin = Math.max(1, Number(Q("[data-add-min]", modal).value || 5));
+        const text = String(Q("[data-add-text]", modal).value || "").trim();
+        if (!text) { alert("Escribe el mensaje de seguimiento."); return; }
+        const item = { id: `fu_${Date.now()}`, name, delayMin, text, enabled: true };
+        await saveFollowups([...curr, item]);
+        closeAdd();
+        await render();
+        setTab("followups");
+      };
+
+      document.documentElement.append(modal);
+      Q("[data-add-name]", modal)?.focus();
+    };
+
+    document.documentElement.append(wrap);
+    setTab(activeTab);
+    await render();
+  }
+
   async function openRulesModal({ loadRules, saveRules }){
     openRulesPanelV2({ loadRules, saveRules });
   }
 
-  window.VZUI = { injectTopBar, openRulesModal };
+  window.VZUI = { injectTopBar, openRulesModal, openTrackingModal };
 })();
 
 

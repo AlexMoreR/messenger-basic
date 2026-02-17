@@ -68,7 +68,12 @@
     location.pathname.includes("/messages/") && location.search.includes("marketplace");
 
   /* ===== Storage ===== */
-  const k = { rules: "__vz_rules_json", byThread: (tid, name) => `__vz_thread_${tid}_${name}` };
+  const k = {
+    rules: "__vz_rules_json",
+    analytics: "__vz_analytics_v1",
+    followups: "__vz_followups_v1",
+    byThread: (tid, name) => `__vz_thread_${tid}_${name}`
+  };
   const S = {
     async get(key, fallback=null){
       try{
@@ -94,6 +99,107 @@
       }catch{}
       localStorage.setItem(key, typeof val==="string"? val: JSON.stringify(val));
     }
+  };
+
+  const emptyAnalytics = () => ({
+    totals: {
+      incoming: 0,
+      replies: 0,
+      followups: 0
+    },
+    rules: {},
+    threads: {},
+    updatedAt: 0
+  });
+
+  const loadAnalytics = async () => {
+    const data = await S.get(k.analytics, null);
+    if (!data || typeof data !== "object") return emptyAnalytics();
+    return {
+      totals: {
+        incoming: Number(data?.totals?.incoming || 0),
+        replies: Number(data?.totals?.replies || 0),
+        followups: Number(data?.totals?.followups || 0)
+      },
+      rules: (data.rules && typeof data.rules === "object") ? data.rules : {},
+      threads: (data.threads && typeof data.threads === "object") ? data.threads : {},
+      updatedAt: Number(data.updatedAt || 0)
+    };
+  };
+
+  const saveAnalytics = async (a) => {
+    a.updatedAt = now();
+    await S.set(k.analytics, a);
+  };
+
+  const ensureThreadAnalytics = (a, tid) => {
+    if (!a.threads[tid]) {
+      a.threads[tid] = {
+        tid,
+        incomingCount: 0,
+        replyCount: 0,
+        followupCount: 0,
+        lastIncomingAt: 0,
+        lastReplyAt: 0,
+        lastFollowupAt: 0,
+        lastIncomingText: "",
+        lastReplyText: "",
+        lastRuleId: "",
+        lastRuleLabel: "",
+        lastFollowupLabel: "",
+        followProgress: {}
+      };
+    }
+    return a.threads[tid];
+  };
+
+  const normalizeFollowup = (item, idx) => {
+    const id = String(item?.id || `fu_${idx + 1}`);
+    const name = String(item?.name || `Seguimiento ${idx + 1}`).slice(0, 80);
+    const delayMin = Math.max(1, Number(item?.delayMin || 5));
+    const text = String(item?.text || "").slice(0, 600);
+    const enabled = !!item?.enabled;
+    return { id, name, delayMin, text, enabled };
+  };
+
+  const loadFollowups = async () => {
+    const arr = await S.get(k.followups, []);
+    if (!Array.isArray(arr)) return [];
+    return arr.map((x, i) => normalizeFollowup(x, i));
+  };
+
+  const saveFollowups = async (arr) => {
+    const safe = (Array.isArray(arr) ? arr : []).map((x, i) => normalizeFollowup(x, i));
+    await S.set(k.followups, safe);
+  };
+
+  const trackIncoming = async (tid, text) => {
+    const a = await loadAnalytics();
+    const t = ensureThreadAnalytics(a, tid);
+    t.incomingCount += 1;
+    t.lastIncomingAt = now();
+    t.lastIncomingText = String(text || "").slice(0, 300);
+    a.totals.incoming += 1;
+    await saveAnalytics(a);
+  };
+
+  const trackReply = async (tid, ruleId, ruleLabel, replyText) => {
+    const a = await loadAnalytics();
+    const t = ensureThreadAnalytics(a, tid);
+    t.replyCount += 1;
+    t.lastReplyAt = now();
+    t.lastReplyText = String(replyText || "").slice(0, 300);
+    t.lastRuleId = String(ruleId || "fallback");
+    t.lastRuleLabel = String(ruleLabel || "Fallback");
+    a.totals.replies += 1;
+
+    if (!a.rules[t.lastRuleId]) {
+      a.rules[t.lastRuleId] = { id: t.lastRuleId, label: t.lastRuleLabel, count: 0, lastAt: 0 };
+    }
+    a.rules[t.lastRuleId].count += 1;
+    a.rules[t.lastRuleId].lastAt = now();
+    a.rules[t.lastRuleId].label = t.lastRuleLabel;
+    await saveAnalytics(a);
   };
 
   /* ===== Estado ===== */
@@ -282,9 +388,40 @@
         'div[dir="auto"], span[dir="auto"], div[data-lexical-text="true"], span[data-lexical-text="true"], p',
         b
       );
-      let text = nodes
-        .map(n => (n.innerText || n.textContent || "").trim())
-        .filter(Boolean)
+      const rawLines = [];
+      for (const n of nodes) {
+        // Excluir texto de controles auxiliares (Intro, botones, fecha, etc.)
+        if (n.closest('[role="button"], button, [data-scope="date_break"]')) continue;
+        const t = (n.innerText || n.textContent || "").trim();
+        if (!t) continue;
+        rawLines.push(...t.split(/\r?\n/).map(x => x.trim()).filter(Boolean));
+      }
+
+      const noise = new Set([
+        "intro",
+        "cargando...",
+        "has enviado",
+        "you sent"
+      ]);
+
+      const lines = [];
+      const seen = new Set();
+      for (const line of rawLines) {
+        const nl = normalize(line);
+        if (!nl) continue;
+        if (noise.has(nl)) continue;
+        if (nl.startsWith("escribe a ")) continue;
+        if (nl.includes("esta escribiendo") || nl.includes("typing")) continue;
+        // Filtra separadores de fecha/hora del hilo
+        if (/^(hoy|ayer|today|yesterday)\b/.test(nl)) continue;
+        if (/^\d{1,2}:\d{2}$/.test(nl)) continue;
+        // Evita duplicados como "Hora Hora"
+        if (seen.has(nl)) continue;
+        seen.add(nl);
+        lines.push(line);
+      }
+
+      let text = lines
         .join("\n")
         .replace(/\s+\n/g, "\n")
         .replace(/\n\s+/g, "\n")
@@ -350,13 +487,25 @@
   };
 
   /* ===== Reglas ===== */
-  const compileRule = (r)=>{ try{ return { re:new RegExp(r.pattern, r.flags||"i"), reply:r.reply }; }catch{ return null; } };
-  const compileAll = (arr)=>(Array.isArray(arr)?arr:[]).map(compileRule).filter(Boolean);
+  const compileRule = (r, idx) => {
+    try {
+      return {
+        re: new RegExp(r.pattern, r.flags || "i"),
+        reply: r.reply,
+        id: `rule_${idx + 1}`,
+        label: `Regla ${idx + 1}`
+      };
+    } catch {
+      return null;
+    }
+  };
+  const compileAll = (arr) => (Array.isArray(arr) ? arr : []).map(compileRule).filter(Boolean);
 
   /* ===== Per-thread keys ===== */
   const lastReplyAtKey      = (tid)=> k.byThread(tid,"last_reply_at");
   const lastSentHashKey     = (tid)=> k.byThread(tid,"last_sent_hash");
   const lastIncomingHashKey = (tid)=> k.byThread(tid,"last_in_hash");
+  const lastTrackedIncomingKey = (tid)=> k.byThread(tid,"last_tracked_in_hash");
   const baselineHashKey     = (tid)=> k.byThread(tid,"baseline_hash");
   // ✅ NUEVO: Key para guardar contenido literal del último mensaje enviado
   const lastSentContentKey  = (tid)=> k.byThread(tid,"last_sent_content");
@@ -477,11 +626,21 @@
       return { done: false, wait: 1200 };
     }
 
+    const trackedHash = await S.get(lastTrackedIncomingKey(tid), "");
+    if (String(trackedHash) !== String(hash)) {
+      await trackIncoming(tid, text);
+      await S.set(lastTrackedIncomingKey(tid), hash);
+    }
+
     // Reglas
     let reply = null;
-    for (const { re, reply: rep } of compiledRules) {
-      if (re.test(text)) {
-        reply = rep;
+    let matchedRuleId = "fallback";
+    let matchedRuleLabel = "Fallback";
+    for (const rule of compiledRules) {
+      if (rule.re.test(text)) {
+        reply = rule.reply;
+        matchedRuleId = rule.id;
+        matchedRuleLabel = rule.label;
         break;
       }
     }
@@ -509,6 +668,7 @@
       await S.set(lastIncomingHashKey(tid), handledIncomingHash);
       await S.set(lastSentHashKey(tid), thisHash);
       await S.set(lastSentContentKey(tid), reply);
+      await trackReply(tid, matchedRuleId, matchedRuleLabel, reply);
       
       lastBubbleHashMem.set(tid, newBubbleHash);
       
@@ -814,6 +974,7 @@
 
     // 3) Procesar cola
     if (queue.length && !processing) processQueueSoon();
+    await processScheduledFollowups();
 
     // 4) ✅ Auto-navegación: SÍ abrir no leídos automáticamente para procesarlos
     if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && unreadTids.length) {
@@ -823,6 +984,96 @@
   };
 
   /* ===== UI (opcional) ===== */
+  const getAnalyticsSummary = async () => {
+    const a = await loadAnalytics();
+    const followups = await loadFollowups();
+    const threads = Object.values(a.threads || {}).sort((x, y) => Number(y.lastIncomingAt || 0) - Number(x.lastIncomingAt || 0));
+    const rulesStats = Object.values(a.rules || {}).sort((x, y) => Number(y.count || 0) - Number(x.count || 0));
+    return {
+      totals: {
+        chats: threads.length,
+        incoming: Number(a?.totals?.incoming || 0),
+        replies: Number(a?.totals?.replies || 0),
+        followups: Number(a?.totals?.followups || 0),
+        trackingEnabled: followups.filter(f => !!f.enabled).length
+      },
+      threads,
+      rules: rulesStats,
+      followups,
+      updatedAt: Number(a.updatedAt || 0)
+    };
+  };
+
+  const sendFollowupForThread = async (tid, text) => {
+    if (!text) return false;
+    if (getActiveTid() !== tid) {
+      let tries = 0;
+      while (tries < CFG.MAX_OPEN_TRIES) {
+        const ok = openThreadById(tid);
+        if (!ok) return false;
+        await sleep(CFG.OPEN_RETRY_MS);
+        if (getActiveTid() === tid) break;
+        tries += 1;
+      }
+      if (getActiveTid() !== tid) return false;
+    }
+    const ok = await sendText(tid, text);
+    if (!ok) return false;
+    await sleep(300);
+    const sentHash = djb2(text);
+    await S.set(lastReplyAtKey(tid), now());
+    await S.set(lastSentHashKey(tid), sentHash);
+    await S.set(lastSentContentKey(tid), text);
+    return true;
+  };
+
+  const processScheduledFollowups = async () => {
+    const followups = (await loadFollowups())
+      .filter(f => !!f.enabled && String(f.text || "").trim())
+      .sort((a, b) => Number(a.delayMin || 0) - Number(b.delayMin || 0));
+    if (!followups.length) return;
+
+    const a = await loadAnalytics();
+    const entries = Object.values(a.threads || {});
+    if (!entries.length) return;
+
+    for (const t of entries) {
+      const tid = t.tid;
+      const lastIncomingAt = Number(t.lastIncomingAt || 0);
+      if (!lastIncomingAt) continue;
+      if (!tid) continue;
+      if (inFlightPerThread.has(tid) || queue.some(q => q.tid === tid)) continue;
+
+      const progress = (t.followProgress && typeof t.followProgress === "object") ? t.followProgress : {};
+      let sentOne = false;
+
+      for (const fu of followups) {
+        const delayMs = Math.max(1, Number(fu.delayMin || 5)) * 60 * 1000;
+        const dueAt = lastIncomingAt + delayMs;
+        if (now() < dueAt) continue;
+
+        const sentForIncomingAt = Number(progress[fu.id] || 0);
+        if (sentForIncomingAt >= lastIncomingAt) continue;
+
+        const ok = await sendFollowupForThread(tid, String(fu.text || ""));
+        if (!ok) continue;
+
+        const fresh = await loadAnalytics();
+        const freshT = ensureThreadAnalytics(fresh, tid);
+        freshT.followupCount = Number(freshT.followupCount || 0) + 1;
+        freshT.lastFollowupAt = now();
+        freshT.lastFollowupLabel = String(fu.name || fu.id);
+        if (!freshT.followProgress || typeof freshT.followProgress !== "object") freshT.followProgress = {};
+        freshT.followProgress[fu.id] = lastIncomingAt;
+        fresh.totals.followups = Number(fresh?.totals?.followups || 0) + 1;
+        await saveAnalytics(fresh);
+        sentOne = true;
+        break;
+      }
+      if (sentOne) continue;
+    }
+  };
+
   const loadRulesJson = async () => {
     let raw = await S.get(k.rules, null);
     if (!raw) raw = JSON.stringify(DEFAULT_RULES, null, 2);
@@ -842,6 +1093,10 @@
       onOpenRules: () => window.VZUI.openRulesModal({
         loadRules: () => loadRulesJson(),
         saveRules: (raw) => saveRulesJson(raw)
+      }),
+      onOpenTracking: () => window.VZUI.openTrackingModal({
+        loadAnalytics: () => getAnalyticsSummary(),
+        saveFollowups: (arr) => saveFollowups(arr)
       })
     });
   };
@@ -890,6 +1145,9 @@
     on:  () => { enabled = true;  },
     off: () => { enabled = false; },
     tick, queue,
+    analytics: () => getAnalyticsSummary(),
+    followups: () => loadFollowups(),
+    setFollowups: (arr) => saveFollowups(arr),
     async rules(){ return rules; },
     async setRules(arr){
       if(!Array.isArray(arr)) throw new Error("setRules espera array");
