@@ -5,13 +5,11 @@
   "description": "Aplicacion de automatizacion",
   "permissions": ["scripting", "storage"],
   "host_permissions": [
-    "*://*.messenger.com/*",
     "*://*.facebook.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "*://*.messenger.com/*",
         "*://*.facebook.com/messages/*"
       ],
       "js": ["ui.js", "content.js"],

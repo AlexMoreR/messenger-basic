@@ -8,7 +8,7 @@
     AUTO_START: true,
     SCAN_EVERY_MS: 900,
     REPLY_COOLDOWN_MS: 12000,
-    THREAD_LOAD_SILENCE_MS: 3000, // ✅ AUMENTADO: 3 segundos al cargar un hilo
+    THREAD_LOAD_SILENCE_MS: 1500, // ✅ REDUCIDO: 1.5 segundos al cargar un hilo (antes 3s)
     SEND_COOLDOWN_MS: 1400,
     DEFAULT_FALLBACK: "",
     DEBUG: true,
@@ -17,8 +17,8 @@
     OPEN_RETRY_MS: 700,
     MAX_OPEN_TRIES: 12,
 
-    // 🔒 Anti-roaming: no recorrer chats automáticamente
-    AUTO_NAVIGATE_ON_UNREAD: false,
+    // 🔒 Anti-roaming DESACTIVADO: SÍ navegamos automáticamente para procesar no leídos
+    AUTO_NAVIGATE_ON_UNREAD: true,
     
     // ✅ NUEVO: Tiempo mínimo entre detección de burbujas
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
@@ -63,7 +63,9 @@
     return n.length < 1 || /\b(visto|missed call|llamada perdida|you reacted|reaccionaste|added|\bagreg[oó]\b|left|sal[ií]o)\b/.test(n);
   };
 
-  const isMarketplacePath = () => location.pathname.startsWith("/marketplace/");
+  const isMarketplacePath = () => 
+    location.pathname.startsWith("/marketplace/") || 
+    location.pathname.includes("/messages/") && location.search.includes("marketplace");
 
   /* ===== Storage ===== */
   const k = { rules: "__vz_rules_json", byThread: (tid, name) => `__vz_thread_${tid}_${name}` };
@@ -102,6 +104,7 @@
 
   let currentTid = null;
   const threadSilenceUntil = new Map(); // tid -> timestamp (CAMBIADO: era variable global)
+  const threadLastProcessedAt = new Map(); // tid -> timestamp (cuando lo procesamos por última vez)
   let msgObserver = null, lastMutationAt = 0, observedRoot = null;
   let pendingAutoOpenTid = null;
 
@@ -123,20 +126,23 @@
   // ✅ NUEVO: Control de detección de burbujas
   let lastBubbleDetectionAt = 0;
 
-  /* ===== Messenger helpers ===== */
+  /* ===== Facebook Messages helpers ===== */
   const MSG_ROW_SELECTORS = [
     '[role="grid"] [role="row"]',
     '[data-testid*="message-container"]',
     '[data-testid*="message"]'
   ];
   const getCurrentThreadIdFromURL = () => {
-    const m = location.pathname.match(/\/(?:e2ee\/)?t\/([^/?#]+)/);
+    // Soporta:
+    // - /messages/t/123456 (facebook.com)
+    // - /messages/e2ee/t/123456 (encriptado)
+    const m = location.pathname.match(/\/messages\/(?:e2ee\/)?t\/([^/?#]+)/);
     return m ? m[1] : null;
   };
   const getThreadLinks = () =>
-    QA('a[href^="/e2ee/t/"], a[href^="/t/"], a[href^="/marketplace/t/"]');
+    QA('a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"], a[href^="/marketplace/t/"]');
   const getThreadIdFromHref = (href) =>
-    href?.match?.(/\/(?:e2ee\/)?t\/([^/?#]+)/)?.[1] || null;
+    href?.match?.(/\/(?:messages\/(?:e2ee\/)?t|marketplace\/t)\/([^/?#]+)/)?.[1] || null;
 
   const looksUnreadRow = (row) => {
     if (!row) return false;
@@ -364,6 +370,14 @@
       log("[queue] tid ya en unreadSeen, saltando:", tid);
       return;
     }
+    
+    // ✅ NUEVO: No re-encolar si procesamos este hilo hace menos de 15 segundos (reducido de 30s)
+    const lastProcessed = threadLastProcessedAt.get(tid) || 0;
+    if (now() - lastProcessed < 15000) {
+      log("[queue] tid procesado hace poco, ignorando sidebar:", tid, "hace", Math.round((now() - lastProcessed) / 1000), "s");
+      return;
+    }
+    
     unreadSeen.add(tid);
     
     // ✅ Verificar silence period antes de encolar
@@ -481,7 +495,7 @@
       const ts = now();
       
       // Esperar a que Facebook renderice la burbuja
-      await sleep(500);
+      await sleep(300); // Reducido de 500ms a 300ms
       
       // Obtener el hash de la burbuja que acabamos de crear
       const { hash: newBubbleHash } = getLastBubbleInfo();
@@ -493,8 +507,11 @@
       
       lastBubbleHashMem.set(tid, newBubbleHash);
       
+      // ✅ NUEVO: Marcar como procesado para evitar re-abrir desde sidebar
+      threadLastProcessedAt.set(tid, ts);
+      
       // ✅ CRÍTICO: Durante este período, el MutationObserver NO procesará NADA
-      const silenceEnd = now() + 8000; // 8 segundos de silencio TOTAL (Facebook puede tardar 5+ segundos en renderizar)
+      const silenceEnd = now() + 4000; // 4 segundos de silencio (reducido de 8s para más velocidad)
       threadSilenceUntil.set(tid, silenceEnd);
       
       log("[reply] enviado", tid, "hash:", newBubbleHash);
@@ -714,9 +731,28 @@
       await S.set(baselineHashKey(tid), base);
       await S.set(lastIncomingHashKey(tid), base); // ✅ evita disparo inmediato
       lastBubbleHashMem.set(tid, base);            // ✅ coherencia memoria
-      setTimeout(() => { processQueueSoon(); }, CFG.THREAD_LOAD_SILENCE_MS + 60);
+      
       log("[thread] abierto (auto)", tid, "baseline:", base);
       pendingAutoOpenTid = null;
+      
+      // ✅ MEJORADO: Después del silence, verificar si realmente HAY mensajes nuevos
+      setTimeout(async () => {
+        // Obtener hash actual después de que el DOM se estabilice
+        await sleep(100); // Reducido de 200ms a 100ms
+        const { hash: currentHash, dir: currentDir, text: currentText } = getLastBubbleInfo();
+        
+        log("[thread] Verificación post-apertura. Current hash:", currentHash, "Baseline:", base, "Dir:", currentDir);
+        
+        // Si hay un mensaje diferente a la baseline Y es entrante
+        if (currentHash !== "0" && currentHash !== base && currentDir === "in" && currentText) {
+          log("[thread] ✅ Mensaje nuevo detectado después de abrir. Encolando...");
+          enqueueActiveTid(tid);
+          processQueueSoon();
+        } else {
+          log("[thread] ⚠️ No hay mensajes nuevos o el último es propio. Hash:", currentHash, "Dir:", currentDir);
+        }
+      }, CFG.THREAD_LOAD_SILENCE_MS + 300); // Reducido de 500ms a 300ms
+      
     } else {
       lastBubbleHashMem.set(tid, base);
       await S.set(baselineHashKey(tid), base);
@@ -765,9 +801,10 @@
     // 3) Procesar cola
     if (queue.length && !processing) processQueueSoon();
 
-    // 4) Anti-roaming: NO abrir no leídos automáticamente
+    // 4) ✅ Auto-navegación: SÍ abrir no leídos automáticamente para procesarlos
     if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && unreadTids.length) {
-      // openThreadById(unreadTids[0]);
+      log("[tick] Abriendo hilo no leído automáticamente:", unreadTids[0]);
+      openThreadById(unreadTids[0]);
     }
   };
 
@@ -809,12 +846,12 @@
 
     // ✅ CRÍTICO: Establecer silence period inicial ANTES de cualquier cosa
     const initialTid = getCurrentThreadIdFromURL() || "unknown";
-    threadSilenceUntil.set(initialTid, now() + 8000); // 8 segundos de silence inicial (más largo)
+    threadSilenceUntil.set(initialTid, now() + 5000); // 5 segundos de silence inicial
     
-    log("[init] Estableciendo silence inicial de 8s para", initialTid);
+    log("[init] Estableciendo silence inicial de 5s para", initialTid);
 
     // ✅ Esperar un poco para que Facebook cargue los mensajes en el DOM
-    await sleep(1000);
+    await sleep(500); // Reducido de 1000ms a 500ms
 
     // ✅ Ahora sí fija baseline/lastIncoming del hilo actual
     await onThreadChanged(initialTid);
@@ -825,9 +862,9 @@
     watchURL();
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo v2.9.3 (FIX: carga inicial + respuesta duplicada). Hilo:", currentTid, "Baseline establecida");
+    log("Bot listo v2.12.0 (ACTUALIZADO: soporte para facebook.com/messages). Hilo:", currentTid, "Baseline establecida");
   };
-
+  
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => CFG.AUTO_START && init(), { once: true });
   } else {
