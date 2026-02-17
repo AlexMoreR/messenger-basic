@@ -6,12 +6,13 @@
 
   const CFG = {
     AUTO_START: true,
-    SCAN_EVERY_MS: 900,
-    REPLY_COOLDOWN_MS: 12000,
+    SCAN_EVERY_MS: 700,
+    REPLY_COOLDOWN_MS: 3000,
     THREAD_LOAD_SILENCE_MS: 1500, // ✅ REDUCIDO: 1.5 segundos al cargar un hilo (antes 3s)
-    SEND_COOLDOWN_MS: 1400,
+    SEND_COOLDOWN_MS: 1100,
     DEFAULT_FALLBACK: "",
-    DEBUG: true,
+    DEBUG: false,
+    DIAG: false,
     STUCK_REHOOK_MS: 8000,
     QUEUE_RETRY_MS: 800,
     OPEN_RETRY_MS: 700,
@@ -41,7 +42,7 @@
 
   /* ===== Utils ===== */
   const log = (...a) => {
-    if (!CFG.DEBUG) return;
+    if (!CFG.DEBUG && !CFG.DIAG) return;
     const time = new Date().toLocaleTimeString('es-ES', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
     console.log(`[VZ-Bot ${time}]`, ...a);
   };
@@ -52,6 +53,19 @@
   const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
   const djb2 = (s) => { s = String(s); let h = 5381; for (let i=0;i<s.length;i++) h = ((h<<5)+h)+s.charCodeAt(i); return String(h>>>0); };
   const normalize = (s) => String(s||"").normalize("NFD").replace(/\p{Diacritic}/gu,"").toLowerCase().trim();
+  const normalizeForCompare = (str) => String(str || "")
+    .replace(/[\u{1F600}-\u{1F64F}]/gu, "")
+    .replace(/[\u{1F300}-\u{1F5FF}]/gu, "")
+    .replace(/[\u{1F680}-\u{1F6FF}]/gu, "")
+    .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, "")
+    .replace(/[\u{2600}-\u{26FF}]/gu, "")
+    .replace(/[\u{2700}-\u{27BF}]/gu, "")
+    .replace(/[\u{FE00}-\u{FE0F}]/gu, "")
+    .replace(/[\u{1F900}-\u{1F9FF}]/gu, "")
+    .replace(/[^\w\sáéíóúñü]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 
   const OUT_HINTS = ["you sent","has enviado","enviaste","enviado por ti","tú:","tu:","usted:","you:","te:","yo:"];
   const isOutHint = (textOrAria) => {
@@ -104,7 +118,6 @@
 
   let currentTid = null;
   const threadSilenceUntil = new Map(); // tid -> timestamp (CAMBIADO: era variable global)
-  const threadLastProcessedAt = new Map(); // tid -> timestamp (cuando lo procesamos por última vez)
   let msgObserver = null, lastMutationAt = 0, observedRoot = null;
   let pendingAutoOpenTid = null;
 
@@ -118,6 +131,7 @@
 
   // Watcher de "no leídos" (sidebar)
   const unreadSeen = new Set();
+  const sidebarPreviewHashMem = new Map();
 
   // Flag: hasta cuándo consideramos que el operador está tecleando
   let operatorTypingUntil = 0;
@@ -125,9 +139,13 @@
 
   // ✅ NUEVO: Control de detección de burbujas
   let lastBubbleDetectionAt = 0;
+  let delayedScanT1 = null;
+  let delayedScanT2 = null;
+  let delayedScanT3 = null;
 
   /* ===== Facebook Messages helpers ===== */
   const MSG_ROW_SELECTORS = [
+    '[data-pagelet="MWMessageRow"]',
     '[role="grid"] [role="row"]',
     '[data-testid*="message-container"]',
     '[data-testid*="message"]'
@@ -143,6 +161,15 @@
     QA('a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"], a[href^="/marketplace/t/"]');
   const getThreadIdFromHref = (href) =>
     href?.match?.(/\/(?:messages\/(?:e2ee\/)?t|marketplace\/t)\/([^/?#]+)/)?.[1] || null;
+  const getActiveThreadIdFromDOM = () => {
+    const activeLink =
+      Q('a[aria-current="page"][href*="/messages/t/"]') ||
+      Q('a[aria-current="true"][href*="/messages/t/"]') ||
+      Q('a[aria-current="page"][href*="/marketplace/t/"]') ||
+      Q('a[aria-current="true"][href*="/marketplace/t/"]');
+    return getThreadIdFromHref(activeLink?.getAttribute("href"));
+  };
+  const getActiveTid = () => getCurrentThreadIdFromURL() || getActiveThreadIdFromDOM() || currentTid || "unknown";
 
   const looksUnreadRow = (row) => {
     if (!row) return false;
@@ -165,6 +192,26 @@
       }
     }
     return unread;
+  };
+
+  const getSidebarThreadSnapshots = () => {
+    const out = [];
+    for (const a of getThreadLinks()) {
+      const href = a.getAttribute("href");
+      const tid = getThreadIdFromHref(href);
+      if (!tid) continue;
+
+      const row = a.closest('[role="row"], li, [data-visualcompletion]') || a.parentElement;
+      if (!row) continue;
+
+      const txt = (row.innerText || row.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!txt) continue;
+
+      out.push({ tid, hash: djb2(txt) });
+    }
+    return out;
   };
 
   const clickUnreadDividerIfAny = () => {
@@ -215,7 +262,8 @@
       try {
         // ✅ MEJORADO: Detectar múltiples eventos para capturar actividad del operador
         ['focus', 'input', 'paste', 'keydown'].forEach(evt => {
-          composer.addEventListener(evt, () => {
+          composer.addEventListener(evt, (e) => {
+            if (!e?.isTrusted) return;
             operatorTypingUntil = now() + 5000; // 5s desde la última actividad
             log("[composer] operador activo, pausando auto-respuesta por 5s");
           }, { capture: true });
@@ -261,8 +309,13 @@
   };
 
   /* ===== Última burbuja (MEJORADO) ===== */
-  const getLastBubbleInfo = () => {
-    const bubbles = QA(MSG_ROW_SELECTORS.join(","), document.body).filter(isVisible);
+  const getLastBubbleInfo = (preferIncoming = false) => {
+    const gridRoot =
+      Q('[role="grid"][aria-label*="Mensajes de la conversación"]') ||
+      Q('[role="grid"][aria-label*="Messages in conversation"]') ||
+      document.body;
+
+    const bubbles = QA(MSG_ROW_SELECTORS.join(","), gridRoot).filter(isVisible);
     const count = bubbles.length;
     
     for (let i = count - 1; i >= 0; i--) {
@@ -283,6 +336,16 @@
         .trim();
 
       if (!text) continue;
+      const nText = normalize(text);
+      if (
+        nText === "intro" ||
+        nText === "cargando..." ||
+        nText.startsWith("escribe a ") ||
+        nText.includes("esta escribiendo") ||
+        nText.includes("typing")
+      ) {
+        continue;
+      }
 
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
       const aria = (b.getAttribute("aria-label") || "").toLowerCase();
@@ -290,6 +353,7 @@
 
       // ✅ MEJORADO: Detección de dirección con más pistas
       let dir = null;
+      let outSignal = false;
 
       // 1) Pistas fuertes de mensaje propio (out)
       if (isOutHint(text) || isOutHint(aria)) {
@@ -299,12 +363,16 @@
 
       // 2) testid de la plataforma
       if (/incoming/.test(testid)) dir = "in";
-      else if (/outgoing/.test(testid)) dir = "out";
+      else if (/outgoing/.test(testid)) {
+        dir = "out";
+        outSignal = true;
+      }
 
       // 3) aria label con pistas de enviado
       if (!dir && aria) {
         if (/(you sent|has enviado|enviaste|mensaje enviado|enviado por ti|sent by you)/.test(aria)) {
           dir = "out";
+          outSignal = true;
         }
         // ✅ NUEVO: También detectar mensajes recibidos
         if (/(received|recibido|mensaje de)/.test(aria)) {
@@ -314,14 +382,36 @@
 
       // 4) ✅ NUEVO: Verificar clases CSS que indican dirección
       const classList = b.className || "";
-      if (classList.includes("outgoing") || classList.includes("sent")) dir = "out";
+      if (classList.includes("outgoing") || classList.includes("sent")) {
+        dir = "out";
+        outSignal = true;
+      }
       if (classList.includes("incoming") || classList.includes("received")) dir = "in";
+
+      // 4.1) Contexto de fila: "Has enviado / You sent" suele vivir fuera de la burbuja
+      if (!dir) {
+        const rowScope =
+          b.closest('[data-pagelet="MWMessageRow"]') ||
+          b.closest('[role="row"]') ||
+          b.closest('[role="gridcell"]') ||
+          b;
+        const rowCtx = normalize(rowScope?.innerText || rowScope?.textContent || "");
+        if (/(you sent|has enviado|enviaste|enviado por ti|sent by you)/.test(rowCtx)) {
+          dir = "out";
+          outSignal = true;
+        }
+      }
 
       // 5) Fallback geométrico solo si no hay otra pista
       if (!dir) {
-        const rect = b.getBoundingClientRect();
-        const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
-        dir = rect.left > mid ? "out" : "in";
+        if (preferIncoming) {
+          // En modo incoming, si no hay señal fuerte de "out", tratamos ambiguo como entrante.
+          dir = outSignal ? "out" : "in";
+        } else {
+          const rect = b.getBoundingClientRect();
+          const mid = (window.innerWidth || document.documentElement.clientWidth) * 0.5;
+          dir = rect.left > mid ? "out" : "in";
+        }
       }
 
       const hash = djb2(`${dir}|${text}|#${count}|${msgId}`);
@@ -371,13 +461,6 @@
       return;
     }
     
-    // ✅ NUEVO: No re-encolar si procesamos este hilo hace menos de 15 segundos (reducido de 30s)
-    const lastProcessed = threadLastProcessedAt.get(tid) || 0;
-    if (now() - lastProcessed < 15000) {
-      log("[queue] tid procesado hace poco, ignorando sidebar:", tid, "hace", Math.round((now() - lastProcessed) / 1000), "s");
-      return;
-    }
-    
     unreadSeen.add(tid);
     
     // ✅ Verificar silence period antes de encolar
@@ -405,13 +488,13 @@
     }
 
     // Asegura estar en el hilo objetivo
-    if ((getCurrentThreadIdFromURL() || "unknown") !== tid) {
+    if (getActiveTid() !== tid) {
       let tries = 0;
       while (tries < CFG.MAX_OPEN_TRIES) {
         const ok = openThreadById(tid);
         if (!ok) return { done: false, wait: CFG.OPEN_RETRY_MS };
         await sleep(CFG.OPEN_RETRY_MS);
-        if ((getCurrentThreadIdFromURL() || "unknown") === tid) break;
+        if (getActiveTid() === tid) break;
         tries++;
       }
       return { done: false, wait: CFG.THREAD_LOAD_SILENCE_MS + 80 };
@@ -429,7 +512,7 @@
     }
 
     // Tomar último mensaje visible
-    const { text, dir, hash } = getLastBubbleInfo();
+    const { text, dir, hash } = getLastBubbleInfo(!isMarketplacePath());
     if (!text || isLikelySystem(text)) {
       return { done: false, wait: 300 };
     }
@@ -452,10 +535,7 @@
       return { done: true };
     }
 
-    // En chats normales exigimos dir === "in"; en Marketplace relajamos esa condición
-    if (!isMarketplacePath() && dir !== "in") {
-      return { done: false, wait: 300 };
-    }
+    // En Facebook moderno la dirección puede venir ambigua; no bloquear aquí por dir.
 
     // ¿ya atendido este mensaje?
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
@@ -463,9 +543,8 @@
 
     // Operador escribiendo → no auto-responder
     if (now() < operatorTypingUntil) {
-      await S.set(lastIncomingHashKey(tid), hash);
-      log("[reply] operador escribiendo, no auto-responder", tid);
-      return { done: true };
+      log("[reply] operador escribiendo, posponiendo auto-respuesta", tid);
+      return { done: false, wait: 1200 };
     }
 
     // Reglas
@@ -483,16 +562,12 @@
       return { done: true };
     }
 
-    const lastSent = await S.get(lastSentHashKey(tid), "");
     const thisHash = djb2(reply);
-    if (String(lastSent) === String(thisHash)) {
-      await S.set(lastIncomingHashKey(tid), hash);
-      return { done: true };
-    }
 
     const ok = await sendText(tid, reply);
     if (ok) {
       const ts = now();
+      const handledIncomingHash = hash;
       
       // Esperar a que Facebook renderice la burbuja
       await sleep(300); // Reducido de 500ms a 300ms
@@ -501,14 +576,12 @@
       const { hash: newBubbleHash } = getLastBubbleInfo();
       
       await S.set(lastReplyAtKey(tid), ts);
-      await S.set(lastIncomingHashKey(tid), newBubbleHash);
+      // Marcar como atendido el ENTRANTE que disparó esta respuesta, no nuestra burbuja saliente.
+      await S.set(lastIncomingHashKey(tid), handledIncomingHash);
       await S.set(lastSentHashKey(tid), thisHash);
       await S.set(lastSentContentKey(tid), reply);
       
       lastBubbleHashMem.set(tid, newBubbleHash);
-      
-      // ✅ NUEVO: Marcar como procesado para evitar re-abrir desde sidebar
-      threadLastProcessedAt.set(tid, ts);
       
       // ✅ CRÍTICO: Durante este período, el MutationObserver NO procesará NADA
       const silenceEnd = now() + 4000; // 4 segundos de silencio (reducido de 8s para más velocidad)
@@ -555,17 +628,13 @@
 
   /* ===== Detección de entrantes (observer + fallback activo) ===== */
   const onNewIncomingInActiveChat = async () => {
-    // ✅ PRIMERA LÍNEA DE DEFENSA: Verificar silence INMEDIATAMENTE
-    const silenceValues = Array.from(threadSilenceUntil.values());
-    const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
-    
-    if (anySilence) {
-      const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
-      log("[active-chat] ⛔ EN SILENCE, abortando detección. Activos:", activeSilences);
+    // ✅ PRIMERA LÍNEA DE DEFENSA: verificar silence SOLO del hilo activo
+    const tid = getActiveTid();
+    const activeSilenceUntil = threadSilenceUntil.get(tid) || 0;
+    if (now() < activeSilenceUntil) {
+      log("[active-chat] ⛔ hilo activo en silence, abortando:", tid);
       return;
     }
-    
-    const tid = getCurrentThreadIdFromURL() || "unknown";
     
     // ✅ Evitar procesamiento muy rápido
     if (now() - lastBubbleDetectionAt < CFG.BUBBLE_DETECTION_COOLDOWN_MS) {
@@ -573,35 +642,29 @@
     }
     lastBubbleDetectionAt = now();
     
-    const { text, dir, hash } = getLastBubbleInfo();
+    let info = getLastBubbleInfo(true);
+    if (!info.text || info.hash === "0") {
+      info = getLastBubbleInfo(false);
+    }
+    const { text, hash } = info;
     if (!text || isLikelySystem(text)) return;
 
-    // ✅ CRÍTICO: Verificar si el texto coincide con CUALQUIERA de nuestras respuestas configuradas
-    // Esto evita que el bot responda a sus propias respuestas
-    
-    // Función para normalizar: quitar emojis, caracteres especiales, espacios extras
-    const normalize = (str) => {
-      return str
-        .replace(/[\u{1F600}-\u{1F64F}]/gu, '') // Emojis emoticones
-        .replace(/[\u{1F300}-\u{1F5FF}]/gu, '') // Símbolos y pictogramas
-        .replace(/[\u{1F680}-\u{1F6FF}]/gu, '') // Transporte y símbolos de mapa
-        .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '') // Banderas
-        .replace(/[\u{2600}-\u{26FF}]/gu, '')   // Símbolos varios
-        .replace(/[\u{2700}-\u{27BF}]/gu, '')   // Dingbats
-        .replace(/[\u{FE00}-\u{FE0F}]/gu, '')   // Selectores de variación
-        .replace(/[\u{1F900}-\u{1F9FF}]/gu, '') // Símbolos suplementarios y pictogramas
-        .replace(/[^\w\sáéíóúñü]/gi, '')        // Quitar todo excepto letras, números, espacios
-        .replace(/\s+/g, ' ')                   // Espacios múltiples a uno solo
-        .trim()
-        .toLowerCase();
-    };
-    
-    const textNormalized = normalize(text);
+    const textNormalized = normalizeForCompare(text);
+    const lastSentContent = await S.get(lastSentContentKey(tid), "");
+    const lastSentNormalized = normalizeForCompare(lastSentContent || "");
+    if (
+      lastSentNormalized &&
+      (textNormalized === lastSentNormalized ||
+       textNormalized.includes(lastSentNormalized.substring(0, Math.min(35, lastSentNormalized.length))))
+    ) {
+      log("[active-chat] coincide con último enviado, ignorando");
+      return;
+    }
     
     log("[active-chat] Verificando contra", compiledRules.length, "reglas. Text normalizado:", textNormalized.substring(0, 50));
     
     for (const rule of compiledRules) {
-      const replyNormalized = normalize(rule.reply || '');
+      const replyNormalized = normalizeForCompare(rule.reply || '');
       const checkPart = replyNormalized.substring(0, Math.min(25, replyNormalized.length));
       
       if (replyNormalized && checkPart.length > 10 && textNormalized.includes(checkPart)) {
@@ -610,16 +673,7 @@
       }
     }
 
-    // Verificación adicional: si es "out" lo ignoramos siempre
-    if (dir === "out") {
-      log("[active-chat] mensaje es 'out', ignorando");
-      return;
-    }
-
-    // En chats normales exigimos dir === "in"
-    if (!isMarketplacePath() && dir !== "in") {
-      return;
-    }
+    // No bloquear en esta etapa por dir; se valida en replyForThread con dedupe robusto.
 
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     const lastMem = lastBubbleHashMem.get(tid) || "";
@@ -634,7 +688,35 @@
     enqueueActiveTid(tid);
   };
 
+  // Reintenta lectura del último mensaje porque Facebook a veces renderiza en dos fases.
+  const scheduleDelayedActiveChecks = () => {
+    try {
+      if (delayedScanT1) clearTimeout(delayedScanT1);
+      if (delayedScanT2) clearTimeout(delayedScanT2);
+      if (delayedScanT3) clearTimeout(delayedScanT3);
+    } catch {}
+
+    delayedScanT1 = setTimeout(() => {
+      if (!enabled) return;
+      onNewIncomingInActiveChat().catch(() => {});
+    }, 220);
+
+    delayedScanT2 = setTimeout(() => {
+      if (!enabled) return;
+      onNewIncomingInActiveChat().catch(() => {});
+    }, 700);
+
+    delayedScanT3 = setTimeout(() => {
+      if (!enabled) return;
+      onNewIncomingInActiveChat().catch(() => {});
+    }, 1600);
+  };
+
   const getMessagesRoot = () => (
+    Q('[role="grid"][aria-label*="Mensajes de la conversación"]') ||
+    Q('[role="grid"][aria-label*="Messages in conversation"]') ||
+    Q('[data-pagelet="MWV2MessageList"] [role="grid"]') ||
+    Q('[role="main"] [role="grid"]') ||
     Q('[role="grid"]') ||
     Q('[data-testid="mwthreadlist"]') ||
     Q('[data-pagelet*="Pagelet"]') ||
@@ -655,18 +737,16 @@
       setTimeout(async () => {
         moQueued = false;
         if (!enabled) return;
-        
-        // ✅ CRÍTICO: NO procesar NADA si CUALQUIER hilo está en silence
-        const silenceValues = Array.from(threadSilenceUntil.values());
-        const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
-        
-        if (anySilence) {
-          const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
-          log("[observer] EN SILENCE, no procesando. Activos:", activeSilences);
+
+        const tid = getActiveTid();
+        const activeSilenceUntil = threadSilenceUntil.get(tid) || 0;
+        if (now() < activeSilenceUntil) {
+          log("[observer] hilo activo en silence, no procesando:", tid);
           return;
         }
 
         await onNewIncomingInActiveChat();
+        scheduleDelayedActiveChecks();
       }, 70);
     });
 
@@ -726,10 +806,17 @@
     }
     
     const base = getBaselineHash();
+    const incomingBase = getLastBubbleInfo(true).hash || "0";
+    const effectiveIncomingBase = incomingBase !== "0" ? incomingBase : base;
 
     if (pendingAutoOpenTid && pendingAutoOpenTid === tid) {
       await S.set(baselineHashKey(tid), base);
-      await S.set(lastIncomingHashKey(tid), base); // ✅ evita disparo inmediato
+      // En auto-apertura desde cola NO marcar como ya atendido:
+      // el mensaje no leído debe poder procesarse en replyForThread.
+      const prevLastIn = await S.get(lastIncomingHashKey(tid), null);
+      if (prevLastIn === null) {
+        await S.set(lastIncomingHashKey(tid), "0");
+      }
       lastBubbleHashMem.set(tid, base);            // ✅ coherencia memoria
       
       log("[thread] abierto (auto)", tid, "baseline:", base);
@@ -756,7 +843,7 @@
     } else {
       lastBubbleHashMem.set(tid, base);
       await S.set(baselineHashKey(tid), base);
-      await S.set(lastIncomingHashKey(tid), base);
+      await S.set(lastIncomingHashKey(tid), effectiveIncomingBase);
       log("[thread] cambiado a", tid, "baseline:", base);
     }
   };
@@ -766,7 +853,7 @@
     setInterval(() => {
       if (location.pathname !== lastPath) {
         lastPath = location.pathname;
-        const tid = getCurrentThreadIdFromURL() || "unknown";
+        const tid = getActiveTid();
         onThreadChanged(tid);
       }
     }, 300);
@@ -776,14 +863,12 @@
   const tick = async () => {
     if (!enabled) return;
 
-    // ✅ CRÍTICO: Si CUALQUIER hilo está en silence, NO procesar NADA
-    const silenceValues = Array.from(threadSilenceUntil.values());
-    const anySilence = silenceValues.some(silenceTime => now() < silenceTime);
-    
-    if (anySilence) {
-      const activeSilences = silenceValues.filter(t => now() < t).map(t => new Date(t).toLocaleTimeString());
-      log("[tick] EN SILENCE, no procesando. Activos:", activeSilences);
-      return; // Silencio total - no procesar nada
+    // Solo considerar silence del hilo activo; no frenar todo por otros hilos.
+    const activeTid = getActiveTid();
+    const activeSilenceUntil = threadSilenceUntil.get(activeTid) || 0;
+    if (now() < activeSilenceUntil) {
+      log("[tick] hilo activo en silence, esperando:", activeTid);
+      return;
     }
 
     // 1) Fallback: si estás en un chat y entra algo, encola TID
@@ -796,6 +881,24 @@
     }
     for (const tid of [...unreadSeen]) {
       if (!unreadTids.includes(tid)) unreadSeen.delete(tid);
+    }
+
+    // 2.1) Fallback: detectar cambios de preview en sidebar para chats no activos.
+    const snaps = getSidebarThreadSnapshots();
+    for (const { tid, hash } of snaps) {
+      if (tid === activeTid) {
+        sidebarPreviewHashMem.set(tid, hash);
+        continue;
+      }
+      const prev = sidebarPreviewHashMem.get(tid);
+      if (!prev) {
+        sidebarPreviewHashMem.set(tid, hash);
+        continue;
+      }
+      if (prev !== hash) {
+        sidebarPreviewHashMem.set(tid, hash);
+        enqueueTid(tid, "sidebar-preview-change");
+      }
     }
 
     // 3) Procesar cola
@@ -835,6 +938,11 @@
   /* ===== Init ===== */
   const init = async () => {
     try {
+      const diagStored = localStorage.getItem("__vz_diag");
+      if (diagStored === "1") CFG.DIAG = true;
+    } catch {}
+
+    try {
       const r = await S.get(k.rules, null);
       rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
     } catch {
@@ -845,7 +953,7 @@
     bindUI();
 
     // ✅ CRÍTICO: Establecer silence period inicial ANTES de cualquier cosa
-    const initialTid = getCurrentThreadIdFromURL() || "unknown";
+    const initialTid = getActiveTid();
     threadSilenceUntil.set(initialTid, now() + 5000); // 5 segundos de silence inicial
     
     log("[init] Estableciendo silence inicial de 5s para", initialTid);
@@ -855,6 +963,11 @@
 
     // ✅ Ahora sí fija baseline/lastIncoming del hilo actual
     await onThreadChanged(initialTid);
+
+    // Baseline inicial del sidebar para detectar cambios reales posteriores.
+    for (const { tid, hash } of getSidebarThreadSnapshots()) {
+      sidebarPreviewHashMem.set(tid, hash);
+    }
 
     // ✅ Luego engancha observer y watchers
     attachObserver();
@@ -875,6 +988,16 @@
   window.__vzBot = {
     on:  () => { enabled = true;  },
     off: () => { enabled = false; },
+    diagOn: () => {
+      CFG.DIAG = true;
+      try { localStorage.setItem("__vz_diag", "1"); } catch {}
+      console.log("[VZ-Bot] DIAG ON");
+    },
+    diagOff: () => {
+      CFG.DIAG = false;
+      try { localStorage.removeItem("__vz_diag"); } catch {}
+      console.log("[VZ-Bot] DIAG OFF");
+    },
     tick, queue,
     async rules(){ return rules; },
     async setRules(arr){
