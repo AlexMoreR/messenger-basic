@@ -12,14 +12,14 @@
     SEND_COOLDOWN_MS: 1100,
     DEFAULT_FALLBACK: "",
     DEBUG: false,
-    DIAG: false,
+    DIAG: true,
     STUCK_REHOOK_MS: 8000,
     QUEUE_RETRY_MS: 800,
     OPEN_RETRY_MS: 700,
     MAX_OPEN_TRIES: 12,
 
     // 🔒 Anti-roaming DESACTIVADO: SÍ navegamos automáticamente para procesar no leídos
-    AUTO_NAVIGATE_ON_UNREAD: true,
+    AUTO_NAVIGATE_ON_UNREAD: false,
     
     // ✅ NUEVO: Tiempo mínimo entre detección de burbujas
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
@@ -175,10 +175,6 @@
     if (!row) return false;
     if (row.querySelector('[data-testid*="unread"]')) return true;
     if (/no\s*le[ií]d[oa]s?|nuevo|unread/i.test(row.textContent || "")) return true;
-    for (const n of row.querySelectorAll("span,div")) {
-      const fw = parseInt(getComputedStyle(n).fontWeight || "400", 10);
-      if (fw >= 600) return true;
-    }
     return false;
   };
 
@@ -349,7 +345,7 @@
 
       const testid = (b.getAttribute("data-testid") || "").toLowerCase();
       const aria = (b.getAttribute("aria-label") || "").toLowerCase();
-      const msgId = b.getAttribute("data-message-id") || b.id || i;
+      const msgId = b.getAttribute("data-message-id") || b.getAttribute("data-mid") || b.id || "";
 
       // ✅ MEJORADO: Detección de dirección con más pistas
       let dir = null;
@@ -357,7 +353,8 @@
 
       // 1) Pistas fuertes de mensaje propio (out)
       if (isOutHint(text) || isOutHint(aria)) {
-        const hash = djb2(`out|${text}|#${count}|${msgId}`);
+        const stableSig = msgId ? `out|id:${msgId}` : `out|txt:${normalizeForCompare(text)}`;
+        const hash = djb2(stableSig);
         return { text, dir: "out", count, hash };
       }
 
@@ -414,7 +411,8 @@
         }
       }
 
-      const hash = djb2(`${dir}|${text}|#${count}|${msgId}`);
+      const stableSig = msgId ? `${dir}|id:${msgId}` : `${dir}|txt:${normalizeForCompare(text)}`;
+      const hash = djb2(stableSig);
       return { text, dir, count, hash };
     }
     return { text: "", dir: "in", count: 0, hash: "0" };
@@ -531,7 +529,13 @@
     if (isSameHash || isSameContent || containsSentText) {
       // Es nuestro propio mensaje, marcar como procesado y salir
       await S.set(lastIncomingHashKey(tid), hash);
-      log("[reply] mensaje propio detectado, ignorando", tid);
+      log("[reply] mensaje propio detectado, ignorando", tid, { hash });
+      return { done: true };
+    }
+
+    // Seguridad extra: nunca responder si la última burbuja detectada es saliente.
+    if (dir === "out") {
+      log("[reply] última burbuja saliente, ignorando", tid, { hash });
       return { done: true };
     }
 
@@ -539,7 +543,10 @@
 
     // ¿ya atendido este mensaje?
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
-    if (String(lastIn) === String(hash)) return { done: true };
+    if (String(lastIn) === String(hash)) {
+      log("[reply] dedupe hit, ya atendido", tid, { hash });
+      return { done: true };
+    }
 
     // Operador escribiendo → no auto-responder
     if (now() < operatorTypingUntil) {
@@ -568,6 +575,7 @@
     if (ok) {
       const ts = now();
       const handledIncomingHash = hash;
+      log("[reply] enviando respuesta", tid, { handledIncomingHash, replyPreview: String(reply).slice(0, 80) });
       
       // Esperar a que Facebook renderice la burbuja
       await sleep(300); // Reducido de 500ms a 300ms
@@ -646,8 +654,12 @@
     if (!info.text || info.hash === "0") {
       info = getLastBubbleInfo(false);
     }
-    const { text, hash } = info;
+    const { text, dir, hash } = info;
     if (!text || isLikelySystem(text)) return;
+
+    if (dir === "out") {
+      return;
+    }
 
     const textNormalized = normalizeForCompare(text);
     const lastSentContent = await S.get(lastSentContentKey(tid), "");
