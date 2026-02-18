@@ -64,6 +64,9 @@
   const isMarketplacePath = () => 
     location.pathname.startsWith("/marketplace/") || 
     location.pathname.includes("/messages/") && location.search.includes("marketplace");
+  const isMarketplaceBulkActionPage = () =>
+    location.pathname.startsWith("/marketplace/selling/renew_listings") ||
+    location.pathname.startsWith("/marketplace/selling/relist_items");
 
   /* ===== Storage ===== */
   const k = {
@@ -228,6 +231,148 @@
 
   // ✅ NUEVO: Control de detección de burbujas
   let lastBubbleDetectionAt = 0;
+  let renewFlowRunning = false;
+  let renewFlowReloaded = false;
+
+  const normActionText = (el) => normalize(
+    String(el?.innerText || el?.textContent || el?.getAttribute?.("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+
+  const clickSmart = (el) => {
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch {}
+    try { el.click(); } catch {}
+    try {
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    } catch {}
+  };
+
+  const hasNoMoreRelistMessage = () => {
+    const n = normalize(document.body?.innerText || "");
+    return (
+      n.includes("no tienes mas publicaciones que puedan eliminarse y volver a realizarse") ||
+      n.includes("no tienes mas publicaciones que puedan eliminarse y volver a publicarse") ||
+      n.includes("no tienes mas publicaciones para renovar") ||
+      n.includes("you have no more listings that can be deleted and relisted")
+    );
+  };
+
+  const getMarketplaceActionButtons = () => {
+    const labeled = QA(
+      '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
+    ).filter(isVisible);
+    const actionables = QA('button, [role="button"], a').filter(isVisible);
+    const textNodes = QA('div[role="none"], span, div').filter(isVisible);
+    const out = [];
+    const seen = new Set();
+
+    const collectIfMatch = (el) => {
+      const t = normActionText(el);
+      if (!t) return;
+      // Evitar falsos positivos de botones no relacionados
+      if (
+        t.includes("no renovar") ||
+        t.includes("cannot renew") ||
+        t.includes("no se puede") ||
+        t.includes("cancelar") ||
+        t.includes("cerrar")
+      ) return;
+
+      // Acciones permitidas por el usuario:
+      // - Renovar
+      // - Eliminar y volver a publicar
+      const isRenew =
+        t === "renovar" ||
+        t.startsWith("renovar ") ||
+        t.includes(" renovar ") ||
+        t === "renew" ||
+        t.startsWith("renew ");
+
+      const isDeleteRelist =
+        t.includes("eliminar y volver a publicar") ||
+        t.includes("volver a publicar") ||
+        t.includes("delete and relist") ||
+        t.includes("relist");
+
+      if (!(isRenew || isDeleteRelist)) return;
+      // Importante: priorizar siempre controles accionables (role=button/button/a)
+      const target = (el.matches('button, [role="button"], a')
+        ? el
+        : el.closest('button, [role="button"], a'));
+      if (!target || !isVisible(target)) return;
+      if (seen.has(target)) return;
+      seen.add(target);
+      out.push(target);
+    };
+
+    for (const el of labeled) collectIfMatch(el);
+    for (const el of actionables) collectIfMatch(el);
+    for (const el of textNodes) collectIfMatch(el);
+    return out;
+  };
+
+  const runRenewListingsFlow = async () => {
+    if (!isMarketplaceBulkActionPage() || renewFlowRunning || renewFlowReloaded) return;
+    renewFlowRunning = true;
+    try {
+      if (hasNoMoreRelistMessage()) {
+        log("[renew] fin detectado: sin publicaciones para relistar/renovar.");
+        return;
+      }
+
+      let totalClicked = 0;
+      let idleRounds = 0;
+
+      for (let round = 0; round < 60; round++) {
+        // Permite pausar en caliente con el mismo toggle Auto ON/OFF
+        if (!enabled) {
+          log("[renew] pausado por operador.");
+          break;
+        }
+
+        const buttons = getMarketplaceActionButtons().filter((b) => !b.dataset.vzRenewClicked);
+        if (buttons.length) {
+          idleRounds = 0;
+          for (const btn of buttons) {
+            if (!enabled) {
+              log("[renew] pausa detectada durante el lote.");
+              break;
+            }
+            btn.dataset.vzRenewClicked = "1";
+            try {
+              const label = normActionText(btn);
+              clickSmart(btn);
+              totalClicked += 1;
+              log("[renew] click acción:", label || "(sin texto)", "total:", totalClicked);
+            } catch {}
+            await sleep(320);
+          }
+        } else {
+          if (hasNoMoreRelistMessage()) {
+            log("[renew] mensaje de fin detectado durante el proceso.");
+            break;
+          }
+          idleRounds += 1;
+          if (idleRounds >= 4) break;
+        }
+        await sleep(700);
+      }
+
+      if (enabled && totalClicked > 0 && !renewFlowReloaded && !hasNoMoreRelistMessage()) {
+        renewFlowReloaded = true;
+        log("[renew] finalizado. Recargando página...");
+        await sleep(1200);
+        location.reload();
+      } else {
+        log("[renew] no hay botones 'Renovar' pendientes.");
+      }
+    } finally {
+      renewFlowRunning = false;
+    }
+  };
 
   /* ===== Messenger helpers ===== */
   const MSG_ROW_SELECTORS = [
@@ -950,6 +1095,10 @@
   /* ===== Loop principal ===== */
   const tick = async () => {
     if (!enabled) return;
+    if (isMarketplaceBulkActionPage()) {
+      await runRenewListingsFlow();
+      return;
+    }
 
     const activeTid = getActiveTid();
     const activeSilenceUntil = threadSilenceUntil.get(activeTid) || 0;

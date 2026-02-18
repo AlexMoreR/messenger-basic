@@ -11,7 +11,8 @@
     {
       "matches": [
         "*://*.facebook.com/messages/*",
-        "*://*.facebook.com/marketplace/selling/renew_listings/*"
+        "*://*.facebook.com/marketplace/selling/renew_listings/*",
+        "*://*.facebook.com/marketplace/selling/relist_items/*"
       ],
       "js": ["ui.js", "content.js"],
       "run_at": "document_idle"
