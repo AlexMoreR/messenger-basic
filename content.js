@@ -25,17 +25,15 @@
   };
 
   const DEFAULT_RULES = [
-    { pattern: "\\b(soy|me llamo)\\s+([a-záéíóúñ]+)\\b", flags: "i", reply: "¡Mucho gusto! 😊 ¿En qué te ayudo?" },
-    { pattern: "precio|valor|cu[aá]nto cuesta|costo", flags: "i", reply: "Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?" },
-    { pattern: "(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", flags: "i", reply: "Horario de atención:\nLun–Vie: 8:00–18:00\nSáb: 9:00–13:00" },
-    { pattern: "env[ií]o|entrega|domicilio", flags: "i", reply: "¡Sí! Realizamos envíos. ¿Cuál es tu ciudad o dirección aproximada para cotizar?" },
-    { pattern: "^(hola|buen[oa]s|saludos)\\b", flags: "i", reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte." },
-
-    // Regla "cualquiera" por defecto (se verá como modo "Cualquiera" en la UI)
     {
-      pattern: "[\\s\\S]+",
+      pattern: "hola",
       flags: "i",
-      reply: "Gracias por tu mensaje 🙌\n\nEn un momento un asesor revisará tu consulta."
+      reply: "¡Hola! 😊\n\nCuéntame un poco más para ayudarte."
+    },
+    {
+      pattern: "precio",
+      flags: "i",
+      reply: "Nuestros precios varían según el producto/servicio.\n¿De qué producto te interesa saber el precio?"
     }
   ];
 

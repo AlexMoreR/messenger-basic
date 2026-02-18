@@ -72,6 +72,8 @@
   .vz2-preview{font:12px/1.3 system-ui; color:#94a3b8; margin-top:2px}
   .vz2-chips{display:flex; gap:6px; flex-wrap:wrap}
   .vz2-chip{font:600 11px/1.1 system-ui; border-radius:999px; padding:5px 8px; border:1px solid rgba(148,163,184,.3); background:#1e293b}
+  .vz2-chip.kw{display:inline-flex; align-items:center; gap:6px; padding:4px 8px; background:#0b2540; border-color:rgba(125,211,252,.45); color:#cfefff}
+  .vz2-chipX{border:0; background:transparent; color:#9ad8ff; font:700 12px/1 system-ui; cursor:pointer; padding:0; width:14px; height:14px; line-height:14px}
   .vz2-chip.on{background:#065f46; border-color:#10b981}
   .vz2-chip.off{background:#3f3f46; border-color:#71717a}
   .vz2-row{display:flex; gap:8px; align-items:center}
@@ -125,18 +127,18 @@
   const UI_KEY = "__vz_rules_ui";
 
   // Modelo UI por regla
-  // { enabled, mode, text, rawRegex, reply }
+  // { enabled, mode, text, words[], rawRegex, reply }
   let uiRules = [];
   let filterText = "";
   let panelOpen = false;
 
   const templates = [
-    { label:"Saludo",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"^(hola|buen[oa]s|saludos)\\b", text:"", reply:"Â¡Hola! ðŸ˜Š\n\nCuÃ©ntame un poco mÃ¡s para ayudarte." } },
-    { label:"Precio",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"precio|valor|cu[aÃ¡]nto cuesta|costo", text:"", reply:"Nuestros precios varÃ­an segÃºn el producto/servicio.\nÂ¿De quÃ© producto te interesa saber el precio?" } },
-    { label:"Horarios", prefill:{ enabled:true, mode:"Regex",      rawRegex:"(?:\\b|\\s)(horario|hora|atienden)(?:\\b|\\s)", text:"", reply:"Horario de atenciÃ³n:\nLunâ€“Vie: 8:00â€“18:00\nSÃ¡b: 9:00â€“13:00" } },
-    { label:"EnvÃ­os",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"env[iÃ­]o|entrega|domicilio", text:"", reply:"Â¡SÃ­! Realizamos envÃ­os. Â¿CuÃ¡l es tu ciudad o direcciÃ³n aproximada para cotizar?" } },
-    { label:"Nombre",   prefill:{ enabled:true, mode:"Regex",      rawRegex:"\\b(soy|me llamo)\\s+([a-zÃ¡Ã©Ã­Ã³ÃºÃ±]+)\\b", text:"", reply:"Â¡Mucho gusto! ðŸ˜Š Â¿En quÃ© te ayudo?" } },
-    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", rawRegex:"", text:"", reply:"Gracias por tu mensaje ðŸ™Œ\n\nEn un momento un asesor revisarÃ¡ tu consulta." } },
+    { label:"Saludo",   prefill:{ enabled:true, mode:"Contiene", text:"hola", words:["hola","buenas","saludos"], rawRegex:"", reply:"Â¡Hola! ðŸ˜Š\n\nCuÃ©ntame un poco mÃ¡s para ayudarte." } },
+    { label:"Precio",   prefill:{ enabled:true, mode:"Contiene", text:"precio", words:["precio","valor","costo"], rawRegex:"", reply:"Nuestros precios varÃ­an segÃºn el producto/servicio.\nÂ¿De quÃ© producto te interesa saber el precio?" } },
+    { label:"Horarios", prefill:{ enabled:true, mode:"Contiene", text:"horario", words:["horario","hora","atienden"], rawRegex:"", reply:"Horario de atenciÃ³n:\nLunâ€“Vie: 8:00â€“18:00\nSÃ¡b: 9:00â€“13:00" } },
+    { label:"EnvÃ­os",   prefill:{ enabled:true, mode:"Contiene", text:"envio", words:["envio","entrega","domicilio"], rawRegex:"", reply:"Â¡SÃ­! Realizamos envÃ­os. Â¿CuÃ¡l es tu ciudad o direcciÃ³n aproximada para cotizar?" } },
+    { label:"Nombre",   prefill:{ enabled:true, mode:"Contiene", text:"me llamo", words:["soy","me llamo"], rawRegex:"", reply:"Â¡Mucho gusto! ðŸ˜Š Â¿En quÃ© te ayudo?" } },
+    { label:"Cualquiera", prefill:{ enabled:true, mode:"Cualquiera", rawRegex:"", text:"", words:[], reply:"Gracias por tu mensaje ðŸ™Œ\n\nEn un momento un asesor revisarÃ¡ tu consulta." } },
   ];
 
   // Exporta al motor: modo "Cualquiera" genera [\s\S]+, siempre con flag i
@@ -151,8 +153,13 @@
         pattern = String(r.rawRegex || "").trim();
         if (!pattern) continue;
       } else {
-        const esc = escapeRegExp(String(r.text||""));
-        if (!esc) continue;
+        const words = Array.isArray(r.words)
+          ? r.words.map(w => String(w || "").trim()).filter(Boolean)
+          : [];
+        const source = words.length ? words : [String(r.text || "").trim()];
+        const escaped = source.map((w) => escapeRegExp(w)).filter(Boolean);
+        if (!escaped.length) continue;
+        const esc = escaped.length === 1 ? escaped[0] : `(?:${escaped.join("|")})`;
         switch(r.mode){
           case "Contiene":   pattern = esc; break;
           case "Empieza":    pattern = `^${esc}`; break;
@@ -199,7 +206,7 @@
 
       arr.push({
         enabled: true,
-        mode, text, rawRegex,
+        mode, text, rawRegex, words: text ? [text] : [],
         reply: String(r.reply||"")
       });
     }
@@ -752,7 +759,9 @@
 
     const summarize = (r, i) => {
       const nm = String(r.name || "").trim() || `Regla ${i + 1}`;
-      const preview = r.mode === "Regex" ? String(r.rawRegex || "") : String(r.text || "");
+      const preview = r.mode === "Regex"
+        ? String(r.rawRegex || "")
+        : (Array.isArray(r.words) && r.words.length ? r.words.join(" | ") : String(r.text || ""));
       return { nm, preview };
     };
 
@@ -773,7 +782,7 @@
     };
 
     btnNew.onclick = () => {
-      uiRules.push({ name:"", enabled:true, mode:"Contiene", text:"", rawRegex:"", reply:"" });
+      uiRules.push({ name:"", enabled:true, mode:"Contiene", text:"", words:[], rawRegex:"", reply:"" });
       openEditor(uiRules.length - 1, true);
     };
 
@@ -895,12 +904,16 @@
               <div class="vz2-label">Modo</div>
               <select class="vz2-select" data-mode>
                 <option>Cualquiera</option><option>Contiene</option><option>Igual a</option>
-                <option>Empieza</option><option>Termina</option><option>Regex</option>
+                <option>Empieza</option><option>Termina</option>
               </select>
             </div>
             <div class="vz2-field">
               <div class="vz2-label" data-pattern-label>Patron / condicion</div>
-              <input class="vz2-input" data-pattern placeholder="Ej: precio">
+              <div class="vz2-row">
+                <input class="vz2-input" data-pattern placeholder="Ej: precio" style="flex:1">
+                <button class="vz2-btn" data-pattern-add>+</button>
+              </div>
+              <div class="vz2-chips" data-pattern-chips></div>
             </div>
             <div class="vz2-field">
               <div class="vz2-label">Respuesta automatica</div>
@@ -919,20 +932,74 @@
       const enabled = Q("[data-enabled]", modal);
       const mode = Q("[data-mode]", modal);
       const pattern = Q("[data-pattern]", modal);
+      const patternAdd = Q("[data-pattern-add]", modal);
+      const patternChips = Q("[data-pattern-chips]", modal);
       const pl = Q("[data-pattern-label]", modal);
       const reply = Q("[data-reply]", modal);
+      let words = Array.isArray(r.words) ? [...r.words] : [];
+      if (!words.length && r.text && r.mode !== "Cualquiera") words = [String(r.text)];
 
       name.value = r.name || "";
       enabled.checked = !!r.enabled;
-      mode.value = r.mode || "Contiene";
-      pattern.value = mode.value === "Regex" ? (r.rawRegex || "") : (r.text || "");
+      mode.value = (r.mode === "Regex" ? "Contiene" : (r.mode || "Contiene"));
+      pattern.value = "";
       reply.value = r.reply || "";
 
+      const addWord = () => {
+        const w = String(pattern.value || "").trim();
+        if (!w) return;
+        if (words.some(x => String(x).toLowerCase() === w.toLowerCase())) {
+          pattern.value = "";
+          return;
+        }
+        words.push(w);
+        pattern.value = "";
+        renderWords();
+      };
+      const removeWordAt = (i) => {
+        words.splice(i, 1);
+        renderWords();
+      };
+      const renderWords = () => {
+        patternChips.innerHTML = "";
+        if (!words.length) {
+          patternChips.innerHTML = `<span class="vz2-trackMeta">Sin palabras agregadas.</span>`;
+          return;
+        }
+        words.forEach((w, i) => {
+          const chip = document.createElement("span");
+          chip.className = "vz2-chip kw";
+          chip.innerHTML = `${esc(w)} <button class="vz2-chipX" title="Quitar" aria-label="Quitar">&times;</button>`;
+          Q(".vz2-chipX", chip).onclick = () => removeWordAt(i);
+          patternChips.append(chip);
+        });
+      };
+
       const sync = () => {
-        pl.textContent = mode.value === "Regex" ? "Expresion regular" : "Patron / condicion";
-        pattern.disabled = mode.value === "Cualquiera";
+        if (mode.value === "Cualquiera") {
+          pl.textContent = "Sin condicion (responde a cualquiera)";
+          pattern.disabled = true;
+          pattern.value = "";
+          patternAdd.style.display = "none";
+          patternChips.style.display = "none";
+          return;
+        }
+        pl.textContent = "Palabras a coincidir (Enter o +)";
+        pattern.disabled = false;
+        pattern.placeholder = "Ej: precio";
+        pattern.value = "";
+        patternAdd.style.display = "";
+        patternChips.style.display = "";
       };
       mode.onchange = sync;
+      patternAdd.onclick = addWord;
+      pattern.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          addWord();
+        }
+      });
+      renderWords();
       sync();
 
       Q("[data-close]", modal).onclick = () => modal.remove();
@@ -947,16 +1014,18 @@
       Q("[data-save]", modal).onclick = async () => {
         const m = mode.value;
         const p = String(pattern.value || "").trim();
+        if (m !== "Cualquiera" && p) addWord();
         const rep = String(reply.value || "").trim();
         if (!rep) { alert("La respuesta no puede estar vacia."); return; }
-        if (m !== "Cualquiera" && !p) { alert("La condicion no puede estar vacia."); return; }
+        if (m !== "Cualquiera" && !words.length) { alert("La condicion no puede estar vacia."); return; }
         uiRules[idx] = {
           ...uiRules[idx],
           name: String(name.value || "").trim(),
           enabled: enabled.checked,
           mode: m,
-          text: m === "Regex" || m === "Cualquiera" ? "" : p,
-          rawRegex: m === "Regex" ? p : "",
+          words: m === "Cualquiera" ? [] : words,
+          text: m === "Cualquiera" ? "" : (words[0] || ""),
+          rawRegex: "",
           reply: rep
         };
         await publishRules();
@@ -979,6 +1048,20 @@
           uiRules = [];
         }
       }
+      uiRules = uiRules.map((r) => {
+        const next = { ...r };
+        if (next.mode === "Regex") {
+          next.mode = "Contiene";
+          const seed = String(next.text || next.rawRegex || "").trim();
+          next.words = seed ? [seed] : [];
+          next.text = seed;
+          next.rawRegex = "";
+        } else if (!Array.isArray(next.words)) {
+          const seed = String(next.text || "").trim();
+          next.words = seed ? [seed] : [];
+        }
+        return next;
+      });
       await saveDraft();
       render();
     })();
