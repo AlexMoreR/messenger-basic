@@ -183,7 +183,9 @@
           left: 0 !important; right: 0 !important;
           height: ${BAR_H}px !important; z-index: 2147483646 !important;
           display: flex !important; align-items: center !important;
-          gap: 8px !important; padding: 0 16px !important;
+          gap: 8px !important; padding: 0 12px !important;
+          overflow-x: auto !important; overflow-y: hidden !important;
+          white-space: nowrap !important; scrollbar-width: none !important;
           background: linear-gradient(90deg,#0f172a 0%,#1e293b 100%) !important;
           border-bottom: 1px solid rgba(148,163,184,.25) !important;
           box-shadow: 0 2px 12px rgba(0,0,0,.45) !important;
@@ -191,6 +193,7 @@
           font: 600 13px/1 'Poppins',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif !important;
           user-select: none !important; box-sizing: border-box !important;
         }
+        #${BAR_ID}::-webkit-scrollbar { display: none !important; }
       `;
       document.documentElement.appendChild(st);
     }
@@ -206,6 +209,10 @@
 
     /* Barra visual */
     const bar = document.createElement("div"); bar.id = BAR_ID;
+    const path = String(location.pathname || "");
+    const isMessagesPage = path.startsWith("/messages/");
+    const isRenewPage = path.startsWith("/marketplace/selling/renew_listings") || path.startsWith("/marketplace/selling/relist_items");
+    const isAutomationPage = isMessagesPage || isRenewPage;
 
     const brand = document.createElement("span");
     brand.textContent = "NETMAGI";
@@ -252,7 +259,17 @@
     const btnRenew = mkBtn("Renovar", "#92400e", "#f59e0b");
     btnRenew.onclick = () => onGoRenew?.() ?? goTo("https://www.facebook.com/marketplace/selling/renew_listings/");
 
-    bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, sep(), btnMessenger, btnRenew);
+    const helper = document.createElement("span");
+    helper.textContent = isAutomationPage ? "Panel activo" : "Accesos directos";
+    Object.assign(helper.style, { color:"#cbd5e1", fontSize:"12px", fontWeight:"600", marginRight:"2px", flexShrink:"0" });
+
+    if (isAutomationPage) {
+      bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, sep(), helper);
+      if (!isMessagesPage) bar.append(btnMessenger);
+      if (!isRenewPage) bar.append(btnRenew);
+    } else {
+      bar.append(brand, sep(), helper, btnMessenger, btnRenew);
+    }
     document.documentElement.appendChild(bar); // fuera del body
 
     /* Observer: guarda top original y suma BAR_H a cada header fixed/sticky */
