@@ -260,6 +260,9 @@
       n.includes("no tienes mas publicaciones que puedan eliminarse y volver a realizarse") ||
       n.includes("no tienes mas publicaciones que puedan eliminarse y volver a publicarse") ||
       n.includes("no tienes mas publicaciones para renovar") ||
+      n.includes("no hay publicaciones para renovar") ||
+      n.includes("no hay mas publicaciones para renovar") ||
+      n.includes("no listings to renew") ||
       n.includes("you have no more listings that can be deleted and relisted")
     );
   };
@@ -365,13 +368,14 @@
         await sleep(700);
       }
 
-      if (enabled && totalClicked > 0 && !renewFlowReloaded && !hasNoMoreRelistMessage()) {
+      const remainingButtons = getMarketplaceActionButtons().filter((b) => !b.dataset.vzRenewClicked);
+      if (enabled && totalClicked > 0 && !renewFlowReloaded && !hasNoMoreRelistMessage() && remainingButtons.length > 0) {
         renewFlowReloaded = true;
         log("[renew] finalizado. Recargando página...");
         await sleep(1200);
         location.reload();
       } else {
-        log("[renew] no hay botones 'Renovar' pendientes.");
+        log("[renew] sin recarga: no hay acciones pendientes para renovar.");
       }
     } finally {
       renewFlowRunning = false;
