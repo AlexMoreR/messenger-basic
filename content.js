@@ -18,10 +18,12 @@
     MAX_OPEN_TRIES: 12,
 
     // 🔒 Anti-roaming DESACTIVADO: SÍ navegamos automáticamente para procesar no leídos
-    AUTO_NAVIGATE_ON_UNREAD: false,
+    AUTO_NAVIGATE_ON_UNREAD: true,
     
     // ✅ NUEVO: Tiempo mínimo entre detección de burbujas
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
+    SEND_GUARD_MS: 1800,
+    OPERATOR_PAUSE_MS: 2500,
   };
 
   const DEFAULT_RULES = [
@@ -467,11 +469,15 @@
       lastComposerEl = composer;
       try {
         // ✅ MEJORADO: Detectar múltiples eventos para capturar actividad del operador
-        ['focus', 'input', 'paste', 'keydown'].forEach(evt => {
+        ['keydown', 'paste', 'beforeinput'].forEach(evt => {
           composer.addEventListener(evt, (e) => {
             if (!e?.isTrusted) return;
-            operatorTypingUntil = now() + 5000; // 5s desde la última actividad
-            log("[composer] operador activo, pausando auto-respuesta por 5s");
+            if (evt === "keydown") {
+              const k = String(e.key || "");
+              if (!k || k.length > 1) return; // solo teclas de texto reales
+            }
+            operatorTypingUntil = now() + CFG.OPERATOR_PAUSE_MS;
+            log("[composer] operador activo, pausando auto-respuesta");
           }, { capture: true });
         });
       } catch {}
@@ -482,15 +488,30 @@
 
   const emitEnter = (el) => {
     const base = { bubbles:true, cancelable:true, key:"Enter", code:"Enter", which:13, keyCode:13 };
+    // Evita doble/triple envio: un solo evento Enter.
     el.dispatchEvent(new KeyboardEvent("keydown", base));
-    el.dispatchEvent(new KeyboardEvent("keypress", base));
-    el.dispatchEvent(new KeyboardEvent("keyup", base));
   };
   const shiftEnter = (el) => {
     const base = { bubbles:true, cancelable:true, key:"Enter", code:"Enter", which:13, keyCode:13, shiftKey:true };
     el.dispatchEvent(new KeyboardEvent("keydown", base));
-    el.dispatchEvent(new KeyboardEvent("keypress", base));
-    el.dispatchEvent(new KeyboardEvent("keyup", base));
+  };
+  const findSendButton = (composer) => {
+    const selectors = [
+      'div[role="button"][aria-label*="Enviar"]',
+      'div[role="button"][aria-label*="Send"]',
+      'button[aria-label*="Enviar"]',
+      'button[aria-label*="Send"]'
+    ].join(",");
+    const list = QA(selectors).filter(isVisible);
+    if (!list.length) return null;
+    const cRect = composer?.getBoundingClientRect?.();
+    if (!cRect) return list[0] || null;
+    return list
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el, d: Math.abs(r.left - cRect.right) + Math.abs(r.top - cRect.top) };
+      })
+      .sort((a, b) => a.d - b.d)[0]?.el || null;
   };
   const pasteMultiline = (el, text) => {
     const parts = String(text).replace(/\r\n?/g,"\n").split("\n");
@@ -507,10 +528,22 @@
   };
   const sendText = async (tid, text) => {
     if (!text) return false;
+    const guardKey = k.byThread(tid, "recent_send_guard");
+    const norm = normalize(text).slice(0, 240);
+    const prev = await S.get(guardKey, null);
+    if (prev && String(prev.text || "") === norm && (now() - Number(prev.at || 0) < CFG.SEND_GUARD_MS)) {
+      log("[send] bloqueado por guard anti-duplicado", tid);
+      return false;
+    }
+    await S.set(guardKey, { text: norm, at: now() });
+
     const composer = findComposer(); if (!composer) return false;
     sendCooldownUntil.set(tid, now()+CFG.SEND_COOLDOWN_MS);
     pasteMultiline(composer, text);
-    setTimeout(()=>emitEnter(composer), 30);
+    await sleep(50);
+    const sendBtn = findSendButton(composer);
+    if (sendBtn) clickSmart(sendBtn);
+    else emitEnter(composer);
     return true;
   };
 
@@ -590,7 +623,7 @@
 
       // 1) Pistas fuertes de mensaje propio (out)
       if (isOutHint(text) || isOutHint(aria)) {
-        const stableSig = msgId ? `out|id:${msgId}` : `out|txt:${normalize(text)}`;
+        const stableSig = msgId ? `out|id:${msgId}` : `out|txt:${normalize(text)}|n:${count}`;
         const hash = djb2(stableSig);
         return { text, dir: "out", count, hash };
       }
@@ -622,7 +655,8 @@
         dir = rect.left > mid ? "out" : "in";
       }
 
-      const stableSig = msgId ? `${dir}|id:${msgId}` : `${dir}|txt:${normalize(text)}`;
+      // Si FB no expone message-id, agregamos count para diferenciar mensajes repetidos (ej: "hola" dos veces).
+      const stableSig = msgId ? `${dir}|id:${msgId}` : `${dir}|txt:${normalize(text)}|n:${count}`;
       const hash = djb2(stableSig);
       return { text, dir, count, hash };
     }
@@ -677,6 +711,10 @@
 
   // Para "no leídos" (sidebar): una vez por transición a no-leído
   const enqueueTidOnce = (tid) => {
+    if (tid === getActiveTid()) {
+      log("[queue] tid activo detectado en sidebar, ignorando:", tid);
+      return;
+    }
     if (unreadSeen.has(tid)) {
       log("[queue] tid ya en unreadSeen, saltando:", tid);
       return;
@@ -1113,6 +1151,7 @@
     // 2) Watcher delta de "no leídos": solo encola TID cuando aparecen nuevos no leídos
     const unreadTids = listUnreadTidsFromSidebar();
     for (const tid of unreadTids) {
+      if (tid === activeTid) continue;
       if (!unreadSeen.has(tid)) enqueueTidOnce(tid);
     }
     for (const tid of [...unreadSeen]) {
