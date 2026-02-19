@@ -158,7 +158,7 @@
           de cada elemento y le suma BAR_H de forma incremental.
           Asi header1 (0→44) y nav (56→100) se compensan ambos.
   ══════════════════════════════════════════════════════════════ */
-  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking }) {
+  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking, onGoMessenger, onGoRenew }) {
     const BAR_ID    = "vz-topbar";
     const SPACER_ID = "vz-topbar-spacer";
     const STYLE_ID  = "vz-topbar-style";
@@ -246,8 +246,13 @@
     };
     const btnRules    = mkBtn("Reglas",      "#4c1d95", "#7c3aed"); btnRules.onclick    = () => onOpenRules?.();
     const btnTracking = mkBtn("Seguimiento", "#0c4a6e", "#0e7490"); btnTracking.onclick = () => onOpenTracking?.();
+    const goTo = (url) => { try { location.href = url; } catch { window.open(url, "_self"); } };
+    const btnMessenger = mkBtn("Messenger", "#1d4ed8", "#3b82f6");
+    btnMessenger.onclick = () => onGoMessenger?.() ?? goTo("https://www.facebook.com/messages/");
+    const btnRenew = mkBtn("Renovar", "#92400e", "#f59e0b");
+    btnRenew.onclick = () => onGoRenew?.() ?? goTo("https://www.facebook.com/marketplace/selling/renew_listings/");
 
-    bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking);
+    bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, sep(), btnMessenger, btnRenew);
     document.documentElement.appendChild(bar); // fuera del body
 
     /* Observer: guarda top original y suma BAR_H a cada header fixed/sticky */

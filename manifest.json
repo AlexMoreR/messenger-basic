@@ -10,9 +10,7 @@
   "content_scripts": [
     {
       "matches": [
-        "*://*.facebook.com/messages/*",
-        "*://*.facebook.com/marketplace/selling/renew_listings/*",
-        "*://*.facebook.com/marketplace/selling/relist_items/*"
+        "*://*.facebook.com/*"
       ],
       "js": ["ui.js", "content.js"],
       "run_at": "document_idle"

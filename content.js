@@ -69,6 +69,8 @@
   const isMarketplaceBulkActionPage = () =>
     location.pathname.startsWith("/marketplace/selling/renew_listings") ||
     location.pathname.startsWith("/marketplace/selling/relist_items");
+  const isMessagesPage = () => location.pathname.startsWith("/messages/");
+  const isAutomationPage = () => isMessagesPage() || isMarketplaceBulkActionPage();
 
   /* ===== Storage ===== */
   const k = {
@@ -1283,7 +1285,9 @@
       onOpenTracking: () => window.VZUI.openTrackingModal({
         loadAnalytics: () => getAnalyticsSummary(),
         saveFollowups: (arr) => saveFollowups(arr)
-      })
+      }),
+      onGoMessenger: () => { location.href = "https://www.facebook.com/messages/"; },
+      onGoRenew: () => { location.href = "https://www.facebook.com/marketplace/selling/renew_listings/"; }
     });
   };
 
@@ -1298,6 +1302,7 @@
     compiledRules = compileAll(rules);
 
     bindUI();
+    if (!isAutomationPage()) return;
 
     // ✅ CRÍTICO: Establecer silence period inicial ANTES de cualquier cosa
     const initialTid = getActiveTid();
