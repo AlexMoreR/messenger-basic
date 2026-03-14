@@ -245,6 +245,7 @@
   let lastBubbleDetectionAt = 0;
   let renewFlowRunning = false;
   let renewCooldownUntil = 0;
+  let renewFinished = false;
 
   const normActionText = (el) => normalize(
     String(el?.innerText || el?.textContent || el?.getAttribute?.("aria-label") || "")
@@ -453,6 +454,7 @@
 
   const runRenewListingsFlow = async () => {
     if (!isMarketplaceBulkActionPage() || renewFlowRunning) return;
+    if (renewFinished) return;
     if (now() < renewCooldownUntil) return;
     renewFlowRunning = true;
     try {
@@ -509,13 +511,19 @@
       if (enabled && (totalClicked > 0 || shouldResetView)) {
         const reloadDelay = randBetween(CFG.RENEW_RELOAD_DELAY_MIN_MS, CFG.RENEW_RELOAD_DELAY_MAX_MS);
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
+        renewFinished = true;
         log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", shouldResetView ? "Forzando salida limpia." : "", "Navegando limpio en", reloadDelay, "ms");
         await sleep(reloadDelay);
         hardNavigateToRenewBase();
         return;
       } else {
         renewCooldownUntil = now() + randBetween(8000, 15000);
-        if (hasNoMoreRelistMessage()) log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
+        if (hasNoMoreRelistMessage()) {
+          renewFinished = true;
+          log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
+          hardNavigateToRenewBase();
+          return;
+        }
         else log("[renew] no hay botones 'Renovar' pendientes.");
       }
     } finally {
@@ -1270,6 +1278,7 @@
     let lastPath = location.pathname;
     setInterval(() => {
       if (location.pathname !== lastPath) {
+        if (!isMarketplaceBulkActionPage()) renewFinished = false;
         lastPath = location.pathname;
         const tid = getActiveTid();
         onThreadChanged(tid);
@@ -1432,7 +1441,10 @@
         saveFollowups: (arr) => saveFollowups(arr)
       }),
       onGoMessenger: () => { location.href = "https://www.facebook.com/messages/"; },
-      onGoRenew: () => { location.href = "https://www.facebook.com/marketplace/selling/renew_listings/"; }
+      onGoRenew: () => {
+        renewFinished = false;
+        location.href = "https://www.facebook.com/marketplace/selling/renew_listings/";
+      }
     });
   };
 
