@@ -74,7 +74,6 @@
   const isMarketplacePath = () => 
     location.pathname.startsWith("/marketplace/") || 
     location.pathname.includes("/messages/") && location.search.includes("marketplace");
-  const isRenewBasePage = () => location.pathname.startsWith("/marketplace/selling/renew_listings");
   const isRenewDialogRoute = () => String(location.search || "").includes("is_routable_dialog=true");
   const isMarketplaceBulkActionPage = () =>
     location.pathname.startsWith("/marketplace/selling/renew_listings") ||
@@ -473,7 +472,6 @@
 
   const runRenewListingsFlow = async () => {
     if (!isMarketplaceBulkActionPage() || renewFlowRunning) return;
-    if (isRenewBasePage() && !isRenewDialogRoute()) return;
     if (renewFinished) return;
     if (now() < renewCooldownUntil) return;
     renewFlowRunning = true;
