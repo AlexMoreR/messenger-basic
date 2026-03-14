@@ -284,6 +284,47 @@
     );
   };
 
+  const getRenewCompletionButtons = () => {
+    const controls = QA('button, [role="button"], a').filter(isVisible);
+    const out = [];
+    const seen = new Set();
+    for (const el of controls) {
+      const t = normActionText(el);
+      if (!t) continue;
+      const isDone =
+        t === "listo" ||
+        t.startsWith("listo ") ||
+        t === "done" ||
+        t.startsWith("done ") ||
+        t === "aceptar" ||
+        t.startsWith("aceptar ");
+      if (!isDone) continue;
+      if (seen.has(el)) continue;
+      seen.add(el);
+      out.push(el);
+    }
+    return out;
+  };
+
+  const closeRenewCompletionDialogs = async () => {
+    let clicked = false;
+    for (let pass = 0; pass < 3; pass++) {
+      const buttons = getRenewCompletionButtons();
+      if (!buttons.length) break;
+      for (const btn of buttons) {
+        const label = normActionText(btn);
+        try {
+          clickSmart(btn);
+          clicked = true;
+          log("[renew] cierre de dialogo:", label || "(sin texto)");
+        } catch {}
+        await sleep(600);
+      }
+      await sleep(900);
+    }
+    return clicked;
+  };
+
   const getMarketplaceActionButtons = () => {
     const labeled = QA(
       '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
@@ -389,9 +430,11 @@
         await sleep(randBetween(3000, 6500));
       }
 
+      const closedDialog = await closeRenewCompletionDialogs();
+
       if (enabled && totalClicked > 0) {
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
-        log("[renew] lote conservador finalizado. Cooldown hasta", new Date(renewCooldownUntil).toLocaleTimeString());
+        log("[renew] lote conservador finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Cooldown hasta", new Date(renewCooldownUntil).toLocaleTimeString());
       } else {
         renewCooldownUntil = now() + randBetween(8000, 15000);
         if (hasNoMoreRelistMessage()) log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
