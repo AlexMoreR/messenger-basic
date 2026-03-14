@@ -416,12 +416,33 @@
     return inDialogRoute || inRelistRoute || hasNoMoreRelistMessage();
   };
 
+  const getRenewSearchRoots = () => {
+    const dialogs = QA('[role="dialog"], [aria-modal="true"]').filter(isVisible);
+    return dialogs.length ? dialogs : [document.body];
+  };
+
+  const isSummaryRenewCard = (el) => {
+    const card = el.closest('[role="button"], button, a, [role="link"], [data-visualcompletion], li, article, section, div');
+    const t = normalize(card?.innerText || card?.textContent || "");
+    if (!t) return false;
+    return (
+      t.includes("para renovar") ||
+      t.includes("crear publicacion") ||
+      t.includes("publicaciones vendidas y agotadas") ||
+      t.includes("publicaciones activas") ||
+      t.includes("estadisticas") ||
+      t.includes("insights")
+    );
+  };
+
   const getMarketplaceActionButtons = () => {
-    const labeled = QA(
-      '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
-    ).filter(isVisible);
-    const actionables = QA('button, [role="button"], a').filter(isVisible);
-    const textNodes = QA('div[role="none"], span, div').filter(isVisible);
+    const roots = getRenewSearchRoots();
+    const labeled = roots.flatMap((root) => QA(
+      '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]',
+      root
+    )).filter(isVisible);
+    const actionables = roots.flatMap((root) => QA('button, [role="button"], a', root)).filter(isVisible);
+    const textNodes = roots.flatMap((root) => QA('div[role="none"], span, div', root)).filter(isVisible);
     const out = [];
     const seen = new Set();
 
@@ -459,6 +480,7 @@
         ? el
         : el.closest('button, [role="button"], a'));
       if (!target || !isVisible(target)) return;
+      if (isSummaryRenewCard(target)) return;
       if (seen.has(target)) return;
       seen.add(target);
       out.push(target);
