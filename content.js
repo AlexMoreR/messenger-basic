@@ -24,11 +24,11 @@
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
     SEND_GUARD_MS: 1800,
     OPERATOR_PAUSE_MS: 2500,
-    RENEW_MAX_ACTIONS_PER_PASS: 3,
-    RENEW_ACTION_DELAY_MIN_MS: 2200,
-    RENEW_ACTION_DELAY_MAX_MS: 5200,
-    RENEW_PASS_COOLDOWN_MIN_MS: 35000,
-    RENEW_PASS_COOLDOWN_MAX_MS: 70000,
+    RENEW_MAX_ACTIONS_PER_PASS: 4,
+    RENEW_ACTION_DELAY_MIN_MS: 1200,
+    RENEW_ACTION_DELAY_MAX_MS: 2600,
+    RENEW_PASS_COOLDOWN_MIN_MS: 12000,
+    RENEW_PASS_COOLDOWN_MAX_MS: 24000,
   };
 
   const DEFAULT_RULES = [
@@ -386,14 +386,14 @@
           idleRounds += 1;
           if (idleRounds >= 2) break;
         }
-        await sleep(randBetween(7000, 14000));
+        await sleep(randBetween(3000, 6500));
       }
 
       if (enabled && totalClicked > 0) {
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
         log("[renew] lote conservador finalizado. Cooldown hasta", new Date(renewCooldownUntil).toLocaleTimeString());
       } else {
-        renewCooldownUntil = now() + randBetween(20000, 40000);
+        renewCooldownUntil = now() + randBetween(8000, 15000);
         if (hasNoMoreRelistMessage()) log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
         else log("[renew] no hay botones 'Renovar' pendientes.");
       }
