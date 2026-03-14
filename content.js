@@ -380,6 +380,17 @@
     return clicked;
   };
 
+  const hardNavigateToRenewBase = () => {
+    const target = "https://www.facebook.com/marketplace/selling/renew_listings/";
+    try {
+      location.assign(target);
+    } catch {
+      try {
+        location.href = target;
+      } catch {}
+    }
+  };
+
   const getMarketplaceActionButtons = () => {
     const labeled = QA(
       '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
@@ -491,9 +502,9 @@
       if (enabled && totalClicked > 0) {
         const reloadDelay = randBetween(CFG.RENEW_RELOAD_DELAY_MIN_MS, CFG.RENEW_RELOAD_DELAY_MAX_MS);
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
-        log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Recargando en", reloadDelay, "ms");
+        log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Navegando limpio en", reloadDelay, "ms");
         await sleep(reloadDelay);
-        location.reload();
+        hardNavigateToRenewBase();
         return;
       } else {
         renewCooldownUntil = now() + randBetween(8000, 15000);
