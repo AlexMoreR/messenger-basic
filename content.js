@@ -24,6 +24,11 @@
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
     SEND_GUARD_MS: 1800,
     OPERATOR_PAUSE_MS: 2500,
+    RENEW_MAX_ACTIONS_PER_PASS: 2,
+    RENEW_ACTION_DELAY_MIN_MS: 4500,
+    RENEW_ACTION_DELAY_MAX_MS: 9000,
+    RENEW_PASS_COOLDOWN_MIN_MS: 90000,
+    RENEW_PASS_COOLDOWN_MAX_MS: 180000,
   };
 
   const DEFAULT_RULES = [
@@ -47,6 +52,7 @@
   };
   const now = () => Date.now();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const randBetween = (min, max) => Math.floor(min + Math.random() * Math.max(1, max - min + 1));
   const Q  = (sel, r=document) => r.querySelector(sel);
   const QA = (sel, r=document) => Array.from(r.querySelectorAll(sel));
   const isVisible = (el) => !!(el && el.isConnected && el.offsetParent);
@@ -236,7 +242,7 @@
   // ✅ NUEVO: Control de detección de burbujas
   let lastBubbleDetectionAt = 0;
   let renewFlowRunning = false;
-  let renewFlowReloaded = false;
+  let renewCooldownUntil = 0;
 
   const normActionText = (el) => normalize(
     String(el?.innerText || el?.textContent || el?.getAttribute?.("aria-label") || "")
@@ -267,6 +273,17 @@
     );
   };
 
+  const hasTemporaryBlockMessage = () => {
+    const n = normalize(document.body?.innerText || "");
+    return (
+      n.includes("se te bloqueo temporalmente") ||
+      n.includes("bloqueo temporalmente") ||
+      n.includes("uso indebido de esta funcion") ||
+      n.includes("blocked temporarily") ||
+      n.includes("youre temporarily blocked")
+    );
+  };
+
   const getMarketplaceActionButtons = () => {
     const labeled = QA(
       '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
@@ -288,7 +305,7 @@
         t.includes("cerrar")
       ) return;
 
-      // Acciones permitidas por el usuario:
+      // Acciones permitidas en este flujo:
       // - Renovar
       // - Eliminar y volver a publicar
       const isRenew =
@@ -322,19 +339,21 @@
   };
 
   const runRenewListingsFlow = async () => {
-    if (!isMarketplaceBulkActionPage() || renewFlowRunning || renewFlowReloaded) return;
+    if (!isMarketplaceBulkActionPage() || renewFlowRunning) return;
+    if (now() < renewCooldownUntil) return;
     renewFlowRunning = true;
     try {
-      if (hasNoMoreRelistMessage()) {
-        log("[renew] fin detectado: sin publicaciones para relistar/renovar.");
+      if (hasTemporaryBlockMessage()) {
+        enabled = false;
+        renewCooldownUntil = now() + (12 * 60 * 60 * 1000);
+        log("[renew] bloqueo temporal detectado. Automatizacion pausada.");
         return;
       }
 
       let totalClicked = 0;
       let idleRounds = 0;
 
-      for (let round = 0; round < 60; round++) {
-        // Permite pausar en caliente con el mismo toggle Auto ON/OFF
+      for (let round = 0; round < 8; round++) {
         if (!enabled) {
           log("[renew] pausado por operador.");
           break;
@@ -343,7 +362,7 @@
         const buttons = getMarketplaceActionButtons().filter((b) => !b.dataset.vzRenewClicked);
         if (buttons.length) {
           idleRounds = 0;
-          for (const btn of buttons) {
+          for (const btn of buttons.slice(0, CFG.RENEW_MAX_ACTIONS_PER_PASS)) {
             if (!enabled) {
               log("[renew] pausa detectada durante el lote.");
               break;
@@ -355,27 +374,28 @@
               totalClicked += 1;
               log("[renew] click acción:", label || "(sin texto)", "total:", totalClicked);
             } catch {}
-            await sleep(320);
+            await sleep(randBetween(CFG.RENEW_ACTION_DELAY_MIN_MS, CFG.RENEW_ACTION_DELAY_MAX_MS));
+            if (hasTemporaryBlockMessage()) {
+              enabled = false;
+              renewCooldownUntil = now() + (12 * 60 * 60 * 1000);
+              log("[renew] bloqueo detectado durante el lote. Automatizacion pausada.");
+              return;
+            }
           }
         } else {
-          if (hasNoMoreRelistMessage()) {
-            log("[renew] mensaje de fin detectado durante el proceso.");
-            break;
-          }
           idleRounds += 1;
-          if (idleRounds >= 4) break;
+          if (idleRounds >= 2) break;
         }
-        await sleep(700);
+        await sleep(randBetween(12000, 22000));
       }
 
-      const remainingButtons = getMarketplaceActionButtons().filter((b) => !b.dataset.vzRenewClicked);
-      if (enabled && totalClicked > 0 && !renewFlowReloaded && !hasNoMoreRelistMessage() && remainingButtons.length > 0) {
-        renewFlowReloaded = true;
-        log("[renew] finalizado. Recargando página...");
-        await sleep(1200);
-        location.reload();
+      if (enabled && totalClicked > 0) {
+        renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
+        log("[renew] lote conservador finalizado. Cooldown hasta", new Date(renewCooldownUntil).toLocaleTimeString());
       } else {
-        log("[renew] sin recarga: no hay acciones pendientes para renovar.");
+        renewCooldownUntil = now() + randBetween(45000, 90000);
+        if (hasNoMoreRelistMessage()) log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
+        else log("[renew] no hay botones 'Renovar' pendientes.");
       }
     } finally {
       renewFlowRunning = false;
