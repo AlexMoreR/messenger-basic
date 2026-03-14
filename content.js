@@ -29,6 +29,8 @@
     RENEW_ACTION_DELAY_MAX_MS: 2600,
     RENEW_PASS_COOLDOWN_MIN_MS: 12000,
     RENEW_PASS_COOLDOWN_MAX_MS: 24000,
+    RENEW_RELOAD_DELAY_MIN_MS: 1400,
+    RENEW_RELOAD_DELAY_MAX_MS: 2600,
   };
 
   const DEFAULT_RULES = [
@@ -285,7 +287,7 @@
   };
 
   const getRenewCompletionButtons = () => {
-    const controls = QA('button, [role="button"], a').filter(isVisible);
+    const controls = QA('button, [role="button"], a, div, span').filter(isVisible);
     const out = [];
     const seen = new Set();
     for (const el of controls) {
@@ -299,9 +301,13 @@
         t === "aceptar" ||
         t.startsWith("aceptar ");
       if (!isDone) continue;
-      if (seen.has(el)) continue;
-      seen.add(el);
-      out.push(el);
+      const target =
+        el.closest('button, [role="button"], a, [tabindex]') ||
+        el;
+      if (!target || !isVisible(target)) continue;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      out.push(target);
     }
     return out;
   };
@@ -430,11 +436,16 @@
         await sleep(randBetween(3000, 6500));
       }
 
+      await sleep(1200);
       const closedDialog = await closeRenewCompletionDialogs();
 
       if (enabled && totalClicked > 0) {
+        const reloadDelay = randBetween(CFG.RENEW_RELOAD_DELAY_MIN_MS, CFG.RENEW_RELOAD_DELAY_MAX_MS);
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
-        log("[renew] lote conservador finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Cooldown hasta", new Date(renewCooldownUntil).toLocaleTimeString());
+        log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Recargando en", reloadDelay, "ms");
+        await sleep(reloadDelay);
+        location.reload();
+        return;
       } else {
         renewCooldownUntil = now() + randBetween(8000, 15000);
         if (hasNoMoreRelistMessage()) log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
