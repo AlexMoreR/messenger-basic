@@ -74,6 +74,8 @@
   const isMarketplacePath = () => 
     location.pathname.startsWith("/marketplace/") || 
     location.pathname.includes("/messages/") && location.search.includes("marketplace");
+  const isRenewBasePage = () => location.pathname.startsWith("/marketplace/selling/renew_listings");
+  const isRenewDialogRoute = () => String(location.search || "").includes("is_routable_dialog=true");
   const isMarketplaceBulkActionPage = () =>
     location.pathname.startsWith("/marketplace/selling/renew_listings") ||
     location.pathname.startsWith("/marketplace/selling/relist_items");
@@ -85,6 +87,7 @@
     rules: "__vz_rules_json",
     analytics: "__vz_analytics_v1",
     followups: "__vz_followups_v1",
+    renewFinished: "__vz_renew_finished_v1",
     byThread: (tid, name) => `__vz_thread_${tid}_${name}`
   };
   const S = {
@@ -392,6 +395,22 @@
     }
   };
 
+  const getRenewFinishedState = () => {
+    try {
+      return sessionStorage.getItem(k.renewFinished) === "1";
+    } catch {
+      return false;
+    }
+  };
+
+  const setRenewFinishedState = (value) => {
+    renewFinished = !!value;
+    try {
+      if (renewFinished) sessionStorage.setItem(k.renewFinished, "1");
+      else sessionStorage.removeItem(k.renewFinished);
+    } catch {}
+  };
+
   const shouldResetRenewView = () => {
     const inDialogRoute = String(location.search || "").includes("is_routable_dialog=true");
     const inRelistRoute = String(location.pathname || "").startsWith("/marketplace/selling/relist_items");
@@ -454,6 +473,7 @@
 
   const runRenewListingsFlow = async () => {
     if (!isMarketplaceBulkActionPage() || renewFlowRunning) return;
+    if (isRenewBasePage() && !isRenewDialogRoute()) return;
     if (renewFinished) return;
     if (now() < renewCooldownUntil) return;
     renewFlowRunning = true;
@@ -511,7 +531,7 @@
       if (enabled && (totalClicked > 0 || shouldResetView)) {
         const reloadDelay = randBetween(CFG.RENEW_RELOAD_DELAY_MIN_MS, CFG.RENEW_RELOAD_DELAY_MAX_MS);
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
-        renewFinished = true;
+        setRenewFinishedState(true);
         log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", shouldResetView ? "Forzando salida limpia." : "", "Navegando limpio en", reloadDelay, "ms");
         await sleep(reloadDelay);
         hardNavigateToRenewBase();
@@ -519,7 +539,7 @@
       } else {
         renewCooldownUntil = now() + randBetween(8000, 15000);
         if (hasNoMoreRelistMessage()) {
-          renewFinished = true;
+          setRenewFinishedState(true);
           log("[renew] fin detectado al cerrar lote: sin mas publicaciones para renovar.");
           hardNavigateToRenewBase();
           return;
@@ -1278,7 +1298,7 @@
     let lastPath = location.pathname;
     setInterval(() => {
       if (location.pathname !== lastPath) {
-        if (!isMarketplaceBulkActionPage()) renewFinished = false;
+        if (!isMarketplaceBulkActionPage()) setRenewFinishedState(false);
         lastPath = location.pathname;
         const tid = getActiveTid();
         onThreadChanged(tid);
@@ -1442,7 +1462,7 @@
       }),
       onGoMessenger: () => { location.href = "https://www.facebook.com/messages/"; },
       onGoRenew: () => {
-        renewFinished = false;
+        setRenewFinishedState(false);
         location.href = "https://www.facebook.com/marketplace/selling/renew_listings/";
       }
     });
@@ -1450,6 +1470,7 @@
 
   /* ===== Init ===== */
   const init = async () => {
+    renewFinished = getRenewFinishedState();
     try {
       const r = await S.get(k.rules, null);
       rules = r ? JSON.parse(r) : DEFAULT_RULES.slice();
