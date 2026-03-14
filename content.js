@@ -391,6 +391,12 @@
     }
   };
 
+  const shouldResetRenewView = () => {
+    const inDialogRoute = String(location.search || "").includes("is_routable_dialog=true");
+    const inRelistRoute = String(location.pathname || "").startsWith("/marketplace/selling/relist_items");
+    return inDialogRoute || inRelistRoute || hasNoMoreRelistMessage();
+  };
+
   const getMarketplaceActionButtons = () => {
     const labeled = QA(
       '[aria-label*="Eliminar y volver a publicar"], [aria-label*="Volver a publicar"], [aria-label*="Renovar"], [aria-label*="Delete and relist"], [aria-label*="Relist"], [aria-label*="Renew"]'
@@ -498,11 +504,12 @@
 
       await sleep(1200);
       const closedDialog = await closeRenewCompletionDialogs();
+      const shouldResetView = shouldResetRenewView();
 
-      if (enabled && totalClicked > 0) {
+      if (enabled && (totalClicked > 0 || shouldResetView)) {
         const reloadDelay = randBetween(CFG.RENEW_RELOAD_DELAY_MIN_MS, CFG.RENEW_RELOAD_DELAY_MAX_MS);
         renewCooldownUntil = now() + randBetween(CFG.RENEW_PASS_COOLDOWN_MIN_MS, CFG.RENEW_PASS_COOLDOWN_MAX_MS);
-        log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", "Navegando limpio en", reloadDelay, "ms");
+        log("[renew] lote finalizado.", closedDialog ? "Dialogo cerrado." : "Sin dialogo final.", shouldResetView ? "Forzando salida limpia." : "", "Navegando limpio en", reloadDelay, "ms");
         await sleep(reloadDelay);
         hardNavigateToRenewBase();
         return;
