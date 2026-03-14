@@ -312,10 +312,59 @@
     return out;
   };
 
+  const getRenewDialogCloseButtons = () => {
+    const selectors = [
+      '[aria-label*="Cerrar"]',
+      '[aria-label*="cerrar"]',
+      '[aria-label*="Close"]',
+      '[aria-label*="close"]'
+    ].join(",");
+    const labeled = QA(selectors).filter(isVisible);
+    const dialogs = QA('[role="dialog"], [aria-modal="true"], div').filter(isVisible);
+    const out = [];
+    const seen = new Set();
+
+    for (const el of labeled) {
+      const target = el.closest('button, [role="button"], a, [tabindex]') || el;
+      if (!target || !isVisible(target) || seen.has(target)) continue;
+      seen.add(target);
+      out.push(target);
+    }
+
+    const renewDialogs = dialogs.filter((el) => {
+      const t = normalize(el.innerText || el.textContent || "");
+      return (
+        t.includes("volver a publicar articulos") ||
+        t.includes("renovar publicaciones") ||
+        t.includes("no tienes mas publicaciones que puedan eliminarse y volver a realizarse") ||
+        t.includes("problema al renovar la publicacion")
+      );
+    });
+
+    for (const dlg of renewDialogs) {
+      const localClose = QA('button, [role="button"], a, [tabindex]', dlg)
+        .filter(isVisible)
+        .find((el) => {
+          const t = normActionText(el);
+          const aria = normalize(el.getAttribute?.("aria-label") || "");
+          return aria.includes("cerrar") || aria.includes("close") || t === "cerrar" || t === "x";
+        });
+      if (localClose && !seen.has(localClose)) {
+        seen.add(localClose);
+        out.push(localClose);
+      }
+    }
+
+    return out;
+  };
+
   const closeRenewCompletionDialogs = async () => {
     let clicked = false;
     for (let pass = 0; pass < 3; pass++) {
-      const buttons = getRenewCompletionButtons();
+      const buttons = [
+        ...getRenewCompletionButtons(),
+        ...getRenewDialogCloseButtons()
+      ];
       if (!buttons.length) break;
       for (const btn of buttons) {
         const label = normActionText(btn);
