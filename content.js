@@ -8,6 +8,8 @@
     AUTO_START: true,
     SCAN_EVERY_MS: 700,
     REPLY_COOLDOWN_MS: 3000,
+    HUMAN_REPLY_DELAY_MIN_MS: 2000,
+    HUMAN_REPLY_DELAY_MAX_MS: 5000,
     THREAD_LOAD_SILENCE_MS: 1500, // ✅ REDUCIDO: 1.5 segundos al cargar un hilo (antes 3s)
     SEND_COOLDOWN_MS: 1100,
     DEFAULT_FALLBACK: "",
@@ -231,6 +233,8 @@
   const inFlightPerThread = new Set();
   const lastBubbleHashMem = new Map(); // tid -> último hash local
   const sendCooldownUntil = new Map(); // tid -> ts
+  const pendingReplyHash = new Map(); // tid -> hash entrante pendiente
+  const pendingReplyReadyAt = new Map(); // tid -> ts listo para responder
 
   // Cola global: items { tid, enqueuedAt, tries }
   const queue = [];
@@ -934,6 +938,20 @@
 
   const processQueueSoon = () => { if (!processing) setTimeout(processQueue, 20); };
 
+  const scheduleHumanReplyDelay = (tid, hash) => {
+    const delay = randBetween(CFG.HUMAN_REPLY_DELAY_MIN_MS, CFG.HUMAN_REPLY_DELAY_MAX_MS);
+    const readyAt = now() + delay;
+    pendingReplyHash.set(tid, String(hash));
+    pendingReplyReadyAt.set(tid, readyAt);
+    log("[reply] demora humana programada:", tid, "en", delay, "ms");
+    return readyAt;
+  };
+
+  const clearPendingReplyDelay = (tid) => {
+    pendingReplyHash.delete(tid);
+    pendingReplyReadyAt.delete(tid);
+  };
+
   const replyForThread = async (tid) => {
     // Cooldown por hilo
     const lastAt = Number(await S.get(lastReplyAtKey(tid), 0));
@@ -996,6 +1014,16 @@
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     if (String(lastIn) === String(hash)) return { done: true };
 
+    const pendingHash = pendingReplyHash.get(tid);
+    const pendingReady = Number(pendingReplyReadyAt.get(tid) || 0);
+    if (String(pendingHash || "") !== String(hash)) {
+      const readyAt = scheduleHumanReplyDelay(tid, hash);
+      return { done: false, wait: Math.max(500, readyAt - now()) };
+    }
+    if (now() < pendingReady) {
+      return { done: false, wait: Math.max(500, pendingReady - now()) };
+    }
+
     // Operador escribiendo → no auto-responder
     if (now() < operatorTypingUntil) {
       log("[reply] operador escribiendo, posponiendo auto-respuesta", tid);
@@ -1023,6 +1051,7 @@
     if (!reply && CFG.DEFAULT_FALLBACK) reply = CFG.DEFAULT_FALLBACK;
 
     if (!reply) {
+      clearPendingReplyDelay(tid);
       await S.set(lastIncomingHashKey(tid), hash);
       return { done: true };
     }
@@ -1033,6 +1062,7 @@
     if (ok) {
       const ts = now();
       const handledIncomingHash = hash;
+      clearPendingReplyDelay(tid);
       
       // Esperar a que Facebook renderice la burbuja
       await sleep(300); // Reducido de 500ms a 300ms
@@ -1255,7 +1285,8 @@
   const onThreadChanged = async (newTid) => {
     const tid = newTid || "unknown";
     currentTid = tid;
-    
+    clearPendingReplyDelay(tid);
+
     // ✅ MEJORADO: Solo establecer silence si no hay uno más largo ya activo
     const existingSilence = threadSilenceUntil.get(tid) || 0;
     const newSilence = now() + CFG.THREAD_LOAD_SILENCE_MS;
