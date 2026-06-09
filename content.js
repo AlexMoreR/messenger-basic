@@ -1189,10 +1189,6 @@
       return;
     }
 
-    if (dir === "out") {
-      return;
-    }
-
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
     const lastMem = lastBubbleHashMem.get(tid) || "";
 
