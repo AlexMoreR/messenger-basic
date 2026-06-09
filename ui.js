@@ -184,13 +184,6 @@
       const st = document.createElement("style");
       st.id = STYLE_ID;
       st.textContent = `
-        body { margin-top: ${BAR_H}px !important; }
-        #${SPACER_ID} {
-          display: block !important; width: 100% !important;
-          height: ${BAR_H}px !important; min-height: ${BAR_H}px !important;
-          flex-shrink: 0 !important; pointer-events: none !important;
-          background: transparent !important; position: static !important;
-        }
         #${BAR_ID} {
           position: fixed !important; top: 0 !important;
           left: 0 !important; right: 0 !important;
@@ -211,14 +204,9 @@
       document.documentElement.appendChild(st);
     }
 
-    /* Spacer fisico */
-    const insertSpacer = () => {
-      if (document.getElementById(SPACER_ID)) return;
-      const sp = document.createElement("div"); sp.id = SPACER_ID;
-      if (document.body) document.body.insertBefore(sp, document.body.firstChild);
-    };
-    if (document.body) insertSpacer();
-    else document.addEventListener("DOMContentLoaded", insertSpacer, { once: true });
+    /* Ya no usamos spacer ni margin-top en body: en vez de empujar Messenger hacia abajo
+       (lo que lo hacía más alto que la pantalla y generaba scroll), reducimos su altura
+       en BAR_H para hacerle sitio a la barra. Eso lo hace shrinkAppForBar(). */
 
     /* Barra visual */
     const bar = document.createElement("div"); bar.id = BAR_ID;
@@ -343,11 +331,34 @@
       }
     };
 
+    // Reduce 44px el/los contenedor(es) de PANTALLA COMPLETA de Messenger para hacer sitio
+    // a la barra, en lugar de empujarlos (que generaba el scroll). Idempotente: una vez
+    // reducidos (alto ≈ vh - BAR_H) dejan de cumplir la condición y no se re-aplica.
+    const shrinkAppForBar = () => {
+      if (!document.body) return;
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      for (const el of Array.from(document.body.children)) {
+        if (OUR_IDS.has(el.id)) continue;
+        const cs = window.getComputedStyle(el);
+        if (cs.display === "none") continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.height < vh - 4) continue; // solo contenedores de (casi) pantalla completa
+        el.style.setProperty("height", `calc(100vh - ${BAR_H}px)`, "important");
+        el.style.setProperty("max-height", `calc(100vh - ${BAR_H}px)`, "important");
+        // Y desplazarlo BAR_H para que empiece justo debajo de la barra
+        if (cs.position === "fixed" || cs.position === "absolute") {
+          el.style.setProperty("top", BAR_H + "px", "important");
+        } else {
+          el.style.setProperty("margin-top", BAR_H + "px", "important");
+        }
+      }
+    };
+
     const compensate = () => {
-      if (!document.getElementById(SPACER_ID)) insertSpacer();
       if (!trackedFixed.size || Date.now() - lastFullScanAt > FULL_SCAN_EVERY_MS) {
         fullScan();
       }
+      shrinkAppForBar();
       applyTops();
     };
 
