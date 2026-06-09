@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "NETMAGI (Basic)",
-  "version": "1.0.0",
+  "version": "2.12.0",
   "description": "Aplicacion de automatizacion",
-  "permissions": ["scripting", "storage"],
+  "permissions": ["storage"],
   "host_permissions": [
-    "*://*.facebook.com/*"
+    "*://*.facebook.com/*",
+    "https://script.google.com/*"
   ],
   "content_scripts": [
     {

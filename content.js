@@ -1,5 +1,5 @@
 // content.js — Bot con COLA FIFO y anti-roaming (solo navega si hay item en cola)
-// v2.7 — 2026-02-16 (FIX: Respuesta duplicada + mejoras de detección)
+// La versión se toma del manifest (chrome.runtime.getManifest().version) — no la dupliques aquí.
 
 (() => {
   "use strict";
@@ -8,8 +8,8 @@
     AUTO_START: true,
     SCAN_EVERY_MS: 700,
     REPLY_COOLDOWN_MS: 3000,
-    HUMAN_REPLY_DELAY_MIN_MS: 2000,
-    HUMAN_REPLY_DELAY_MAX_MS: 5000,
+    HUMAN_REPLY_DELAY_MIN_MS: 3500,
+    HUMAN_REPLY_DELAY_MAX_MS: 9000,
     THREAD_LOAD_SILENCE_MS: 1500, // ✅ REDUCIDO: 1.5 segundos al cargar un hilo (antes 3s)
     SEND_COOLDOWN_MS: 1100,
     DEFAULT_FALLBACK: "",
@@ -21,18 +21,35 @@
 
     // 🔒 Anti-roaming DESACTIVADO: SÍ navegamos automáticamente para procesar no leídos
     AUTO_NAVIGATE_ON_UNREAD: true,
+    AUTO_NAV_COOLDOWN_MS: 5000, // enfriamiento entre auto-aperturas (evita el bucle de reabrir el mismo chat)
     
     // ✅ NUEVO: Tiempo mínimo entre detección de burbujas
     BUBBLE_DETECTION_COOLDOWN_MS: 800,
     SEND_GUARD_MS: 1800,
+    SEND_STABILIZE_MS: 220, // espera para confirmar que el cuadro de texto del chat ya cargó (anti cross-chat)
     OPERATOR_PAUSE_MS: 2500,
-    RENEW_MAX_ACTIONS_PER_PASS: 4,
-    RENEW_ACTION_DELAY_MIN_MS: 1200,
-    RENEW_ACTION_DELAY_MAX_MS: 2600,
-    RENEW_PASS_COOLDOWN_MIN_MS: 12000,
-    RENEW_PASS_COOLDOWN_MAX_MS: 24000,
+    // ⬇️ Marketplace endurecido: menos acciones por pasada y mucho más espaciadas
+    RENEW_MAX_ACTIONS_PER_PASS: 2,      // (era 4)
+    RENEW_ACTION_DELAY_MIN_MS: 3500,    // (era 1200)
+    RENEW_ACTION_DELAY_MAX_MS: 8000,    // (era 2600)
+    RENEW_PASS_COOLDOWN_MIN_MS: 20000,  // (era 12000)
+    RENEW_PASS_COOLDOWN_MAX_MS: 45000,  // (era 24000)
     RENEW_RELOAD_DELAY_MIN_MS: 1400,
     RENEW_RELOAD_DELAY_MAX_MS: 2600,
+    // 🛡️ Tope DURO de acciones de renovación por día (anti-bloqueo de Marketplace)
+    RENEW_DAILY_MAX_ACTIONS: 40,
+    RENEW_DAILY_CAP_COOLDOWN_MS: 7200000, // 2h de pausa al tocar el tope
+
+    // 🛡️ Anti-bloqueo de Messenger
+    // Throttle GLOBAL por cuenta: tiempo mínimo entre CUALQUIER envío (mata las ráfagas)
+    GLOBAL_SEND_MIN_GAP_MS: 15000,
+    GLOBAL_SEND_MAX_GAP_MS: 30000,
+    // Simulación de tecleo humano (el texto se escribe por trozos, no de golpe)
+    TYPING_CHUNK_MIN: 2,
+    TYPING_CHUNK_MAX: 5,
+    TYPING_DELAY_PER_CHUNK_MIN_MS: 45,
+    TYPING_DELAY_PER_CHUNK_MAX_MS: 130,
+    TYPING_TOTAL_MAX_MS: 12000, // tope de tiempo de tecleo para respuestas muy largas
   };
 
   const DEFAULT_RULES = [
@@ -89,8 +106,10 @@
     analytics: "__vz_analytics_v1",
     followups: "__vz_followups_v1",
     renewFinished: "__vz_renew_finished_v1",
+    renewDaily: "__vz_renew_daily_v1",
     byThread: (tid, name) => `__vz_thread_${tid}_${name}`
   };
+  const SETTINGS_KEY = "__vz_settings_v1";
   const S = {
     async get(key, fallback=null){
       try{
@@ -116,6 +135,22 @@
       }catch{}
       localStorage.setItem(key, typeof val==="string"? val: JSON.stringify(val));
     }
+  };
+
+  /* ===== Envío a Google Sheet (opcional) ===== */
+  // URL del Web App de Apps Script. Vacío = desactivado. Se carga desde los ajustes.
+  let sheetWebhookUrl = "";
+  // Fire-and-forget: el navegador no puede leer la respuesta (no-cors), pero la fila se escribe igual.
+  const sendToSheet = (payload) => {
+    if (!sheetWebhookUrl) return;
+    try {
+      fetch(sheetWebhookUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload)
+      }).catch(() => {});
+    } catch {}
   };
 
   const emptyAnalytics = () => ({
@@ -198,6 +233,7 @@
     t.lastIncomingText = String(text || "").slice(0, 300);
     a.totals.incoming += 1;
     await saveAnalytics(a);
+    sendToSheet({ tid, tipo: "entrante", regla: "", texto: String(text || "").slice(0, 500) });
   };
 
   const trackReply = async (tid, ruleId, ruleLabel, replyText) => {
@@ -217,6 +253,7 @@
     a.rules[t.lastRuleId].lastAt = now();
     a.rules[t.lastRuleId].label = t.lastRuleLabel;
     await saveAnalytics(a);
+    sendToSheet({ tid, tipo: "respuesta", regla: String(ruleLabel || ""), texto: String(replyText || "").slice(0, 500) });
   };
 
   /* ===== Estado ===== */
@@ -246,6 +283,12 @@
   // Flag: hasta cuándo consideramos que el operador está tecleando
   let operatorTypingUntil = 0;
   let lastComposerEl = null;
+
+  // 🛡️ Anti-ráfaga: hasta cuándo NO se permite el siguiente envío (a nivel de toda la cuenta)
+  let globalSendReadyAt = 0;
+
+  // Enfriamiento de la auto-navegación a no leídos (evita reabrir el mismo chat en bucle)
+  let autoNavCooldownUntil = 0;
 
   // ✅ NUEVO: Control de detección de burbujas
   let lastBubbleDetectionAt = 0;
@@ -414,6 +457,24 @@
     } catch {}
   };
 
+  // 🛡️ Contador diario de acciones de renovación (persistente, se reinicia cada día)
+  const todayStr = () => {
+    try { return new Date().toISOString().slice(0, 10); } catch { return "0"; }
+  };
+  const getRenewDaily = async () => {
+    const d = await S.get(k.renewDaily, null);
+    if (!d || typeof d !== "object" || d.date !== todayStr()) {
+      return { date: todayStr(), count: 0 };
+    }
+    return { date: d.date, count: Number(d.count || 0) };
+  };
+  const bumpRenewDaily = async (n = 1) => {
+    const cur = await getRenewDaily();
+    cur.count += n;
+    await S.set(k.renewDaily, cur);
+    return cur.count;
+  };
+
   const shouldResetRenewView = () => {
     const inDialogRoute = String(location.search || "").includes("is_routable_dialog=true");
     const inRelistRoute = String(location.pathname || "").startsWith("/marketplace/selling/relist_items");
@@ -509,6 +570,15 @@
         return;
       }
 
+      // 🛡️ Respeta el tope diario antes de empezar la pasada
+      const dailyStart = await getRenewDaily();
+      if (dailyStart.count >= CFG.RENEW_DAILY_MAX_ACTIONS) {
+        renewCooldownUntil = now() + CFG.RENEW_DAILY_CAP_COOLDOWN_MS;
+        setRenewFinishedState(true);
+        log("[renew] tope diario alcanzado (", dailyStart.count, "). Pausando renovación hasta mañana.");
+        return;
+      }
+
       let totalClicked = 0;
       let idleRounds = 0;
 
@@ -531,7 +601,15 @@
               const label = normActionText(btn);
               clickSmart(btn);
               totalClicked += 1;
-              log("[renew] click acción:", label || "(sin texto)", "total:", totalClicked);
+              const dailyCount = await bumpRenewDaily(1);
+              log("[renew] click acción:", label || "(sin texto)", "total:", totalClicked, "hoy:", dailyCount);
+              // 🛡️ Si tocamos el tope diario en medio del lote, cortamos en seco
+              if (dailyCount >= CFG.RENEW_DAILY_MAX_ACTIONS) {
+                renewCooldownUntil = now() + CFG.RENEW_DAILY_CAP_COOLDOWN_MS;
+                setRenewFinishedState(true);
+                log("[renew] tope diario alcanzado durante el lote (", dailyCount, "). Pausando.");
+                return;
+              }
             } catch {}
             await sleep(randBetween(CFG.RENEW_ACTION_DELAY_MIN_MS, CFG.RENEW_ACTION_DELAY_MAX_MS));
             if (hasTemporaryBlockMessage()) {
@@ -601,6 +679,21 @@
     return getThreadIdFromHref(activeLink?.getAttribute("href"));
   };
   const getActiveTid = () => getCurrentThreadIdFromURL() || getActiveThreadIdFromDOM() || currentTid || "unknown";
+
+  // 🔒 Anti cross-chat: ¿alguna señal del DOM/URL apunta a un hilo DISTINTO de tid?
+  // (la URL cambia antes que el panel; el enlace aria-current refleja qué chat está seleccionado)
+  const conflictsThread = (tid) => {
+    const url = getCurrentThreadIdFromURL();
+    const dom = getActiveThreadIdFromDOM();
+    return !!((url && url !== tid) || (dom && dom !== tid));
+  };
+  // Confirmación POSITIVA de que el panel abierto es realmente el de tid (requisito para enviar)
+  const isThreadActiveStrict = (tid) => {
+    if (conflictsThread(tid)) return false;
+    const url = getCurrentThreadIdFromURL();
+    const dom = getActiveThreadIdFromDOM();
+    return url === tid || dom === tid;
+  };
 
   const looksUnreadRow = (row) => {
     if (!row) return false;
@@ -712,21 +805,63 @@
       })
       .sort((a, b) => a.d - b.d)[0]?.el || null;
   };
-  const pasteMultiline = (el, text) => {
-    const parts = String(text).replace(/\r\n?/g,"\n").split("\n");
-    try{ el.focus(); }catch{}
-    parts.forEach((t,i)=>{
-      if(t){
-        const ok=document.execCommand("insertText", false, t);
-        if(!ok) el.textContent=(el.textContent||"")+t;
-        el.dispatchEvent(new InputEvent("input",{bubbles:true,cancelable:true}));
-        el.dispatchEvent(new Event("change",{bubbles:true}));
+  const insertChunk = (el, chunk) => {
+    const ok = document.execCommand("insertText", false, chunk);
+    if (!ok) el.textContent = (el.textContent || "") + chunk;
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  // ✅ Escribe el texto por trozos con pausas (cadencia humana) en lugar de pegarlo de golpe.
+  //    El tiempo total escala con el largo del mensaje, con un tope para respuestas muy largas.
+  const typeLikeHuman = async (el, text) => {
+    const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+
+    // ✅ Coloca foco + cursor DENTRO del cuadro antes de escribir.
+    //    Sin esto, Facebook pierde el primer trozo del mensaje (faltaban los primeros caracteres).
+    try { el.focus(); } catch {}
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false); // cursor al final del contenido
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch {}
+    await sleep(70); // pequeño respiro para que el editor registre el cursor
+
+    // Estima el delay por trozo y escálalo hacia abajo si el mensaje es muy largo (respeta el tope total)
+    const approxChunks = Math.max(1, Math.ceil(String(text).length / CFG.TYPING_CHUNK_MAX));
+    let perChunkBase = randBetween(CFG.TYPING_DELAY_PER_CHUNK_MIN_MS, CFG.TYPING_DELAY_PER_CHUNK_MAX_MS);
+    if (approxChunks * perChunkBase > CFG.TYPING_TOTAL_MAX_MS) {
+      perChunkBase = Math.max(8, Math.floor(CFG.TYPING_TOTAL_MAX_MS / approxChunks));
+    }
+
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      let i = 0;
+      while (i < line.length) {
+        const size = randBetween(CFG.TYPING_CHUNK_MIN, CFG.TYPING_CHUNK_MAX);
+        const chunk = line.slice(i, i + size);
+        i += size;
+        insertChunk(el, chunk);
+        await sleep(Math.max(8, perChunkBase + randBetween(-15, 25)));
       }
-      if(i<parts.length-1) shiftEnter(el);
-    });
+      if (li < lines.length - 1) shiftEnter(el);
+    }
   };
   const sendText = async (tid, text) => {
     if (!text) return false;
+
+    // 🔒 ANTI CROSS-CHAT (1/2): solo escribir si el panel abierto es REALMENTE el de tid.
+    //    Evita que la respuesta del chat B se escriba en el chat A (URL ya cambió pero el panel no).
+    if (!isThreadActiveStrict(tid)) {
+      log("[send] ABORTADO (cross-chat): el chat abierto no es", tid, "| url:", getCurrentThreadIdFromURL(), "dom:", getActiveThreadIdFromDOM());
+      return false;
+    }
+
+    // Guard anti-duplicado: solo LECTURA aquí. Se MARCA más abajo, justo antes de enviar,
+    // para que un aborto por cross-chat NO bloquee el reintento legítimo.
     const guardKey = k.byThread(tid, "recent_send_guard");
     const norm = normalize(text).slice(0, 240);
     const prev = await S.get(guardKey, null);
@@ -734,24 +869,110 @@
       log("[send] bloqueado por guard anti-duplicado", tid);
       return false;
     }
-    await S.set(guardKey, { text: norm, at: now() });
 
     const composer = findComposer(); if (!composer) return false;
+
+    // 🔒 ESTABILIZACIÓN: el panel puede estar terminando de cambiar. Esperamos un poco y
+    //    confirmamos que (a) seguimos en tid y (b) el cuadro de texto NO se re-montó.
+    //    Si el elemento cambió, el chat aún se está cargando → abortamos y se reintenta.
+    await sleep(CFG.SEND_STABILIZE_MS);
+    if (!isThreadActiveStrict(tid)) {
+      log("[send] ABORTADO: el chat cambió durante la estabilización", tid);
+      return false;
+    }
+    const composerNow = findComposer();
+    if (!composerNow || composerNow !== composer) {
+      log("[send] cuadro de texto aún inestable (panel cargando), reintentando", tid);
+      return false;
+    }
+
     sendCooldownUntil.set(tid, now()+CFG.SEND_COOLDOWN_MS);
-    pasteMultiline(composer, text);
-    await sleep(50);
-    const sendBtn = findSendButton(composer);
+    await typeLikeHuman(composerNow, text);
+    await sleep(randBetween(150, 400));
+
+    // 🔒 ANTI CROSS-CHAT (2/2): el tecleo tarda segundos; re-verifica que seguimos en tid
+    //    ANTES de pulsar enviar. Si el chat cambió, no enviamos (se reintentará en el correcto).
+    if (!isThreadActiveStrict(tid)) {
+      log("[send] ABORTADO antes de enviar: el chat cambió | activo:", getActiveTid(), "esperado:", tid);
+      return false;
+    }
+
+    // Ya estamos comprometidos a enviar: marca el guard anti-duplicado ahora.
+    await S.set(guardKey, { text: norm, at: now() });
+
+    const sendBtn = findSendButton(composerNow);
     if (sendBtn) clickSmart(sendBtn);
-    else emitEnter(composer);
+    else emitEnter(composerNow);
+    // 🛡️ Anti-ráfaga: separa este envío del siguiente a nivel de TODA la cuenta
+    globalSendReadyAt = now() + randBetween(CFG.GLOBAL_SEND_MIN_GAP_MS, CFG.GLOBAL_SEND_MAX_GAP_MS);
     return true;
   };
 
   /* ===== Última burbuja (MEJORADO) ===== */
-  const getLastBubbleInfo = () => {
-    const gridRoot =
+  // Raíz del PANEL de mensajes del chat abierto. Clave: NUNCA caer en document.body,
+  // porque entonces se leerían las filas de la lista lateral de chats como si fueran mensajes
+  // (el bug de Marketplace, donde el aria-label del grid no coincide con el de Messenger normal).
+  // Panel del hilo abierto (contiene mensajes + cuadro de texto, NUNCA la lista lateral de chats)
+  const getThreadPanel = () => {
+    const composer = Q('div[contenteditable="true"][role="textbox"]');
+    return (composer && composer.closest('[role="main"]')) || Q('[role="main"]') || null;
+  };
+
+  const getThreadGridRoot = () => {
+    // 1) Por aria-label (varía según idioma)
+    const byLabel =
       Q('[role="grid"][aria-label*="Mensajes de la conversación"]') ||
       Q('[role="grid"][aria-label*="Messages in conversation"]') ||
-      document.body;
+      Q('[data-pagelet="MWV2MessageList"] [role="grid"]');
+    if (byLabel) return byLabel;
+    // 2) El grid dentro del panel del cuadro de texto (excluye la barra lateral)
+    const panel = getThreadPanel();
+    if (panel) {
+      const g = panel.querySelector('[role="grid"]');
+      if (g) return g;
+      return panel; // sin grid reconocible (Marketplace): usamos el panel directo
+    }
+    // 3) Fallback acotado a [role="main"] (jamás document.body)
+    return Q('[role="main"] [role="grid"]') || Q('[role="main"]') || document.body;
+  };
+
+  // 🔁 Plan B (p.ej. Marketplace): sin "filas" reconocibles, deduce el último mensaje
+  //    tomando el texto dir="auto" visualmente MÁS ABAJO del panel del hilo (= último mensaje).
+  const getLastBubbleFallback = () => {
+    const root = getThreadPanel() || getThreadGridRoot();
+    if (!root) return null;
+    const nodes = QA('div[dir="auto"], span[dir="auto"]', root).filter(n =>
+      isVisible(n) &&
+      !n.closest('[role="button"], button, [contenteditable="true"], [data-scope="date_break"]') &&
+      (n.innerText || n.textContent || "").trim()
+    );
+    if (!nodes.length) return null;
+    let best = null, bestTop = -Infinity;
+    for (const n of nodes) {
+      const r = n.getBoundingClientRect();
+      if (r.top > bestTop) { bestTop = r.top; best = n; }
+    }
+    if (!best) return null;
+    const text = (best.innerText || best.textContent || "").trim().replace(/[ \t]+/g, " ");
+    if (!text || isLikelySystem(text)) return null;
+    const r = best.getBoundingClientRect();
+    // Dirección por geometría usando como referencia el CUADRO DE TEXTO (ocupa el ancho del panel
+    // del chat), NO la ventana completa. Así un mensaje del cliente (izquierda del panel) no se
+    // confunde con uno propio solo porque el panel esté en la mitad derecha de la pantalla.
+    const composerEl = Q('div[contenteditable="true"][role="textbox"]');
+    const refRect = composerEl ? composerEl.getBoundingClientRect() : root.getBoundingClientRect();
+    const refCenter = refRect.left + refRect.width / 2;
+    const bubbleCenter = r.left + r.width / 2;
+    const dir = isOutHint(text) ? "out" : (bubbleCenter > refCenter ? "out" : "in");
+    // Huella ESTABLE (solo texto + dirección). NO incluimos el nº de nodos porque fluctúa
+    // mientras FB carga el chat y haría que la huella cambiara en cada lectura.
+    const hash = djb2(`${dir}|fb:${normalize(text)}`);
+    log("[bubble] usando plan B (Marketplace):", text.slice(0, 40), "dir:", dir);
+    return { text, dir, count: 1, hash };
+  };
+
+  const getLastBubbleInfo = () => {
+    const gridRoot = getThreadGridRoot();
     const bubbles = QA(MSG_ROW_SELECTORS.join(","), gridRoot).filter(isVisible);
     const count = bubbles.length;
     
@@ -859,6 +1080,9 @@
       const hash = djb2(stableSig);
       return { text, dir, count, hash };
     }
+    // Nada encontrado por el método normal → intentar plan B (Marketplace)
+    const fb = getLastBubbleFallback();
+    if (fb) return fb;
     return { text: "", dir: "in", count: 0, hash: "0" };
   };
 
@@ -983,6 +1207,13 @@
       return { done: false, wait: (sendCooldownUntil.get(tid) || 0) - now() };
     }
 
+    // 🔒 Si el DOM/URL apunta a otro hilo, el panel aún no terminó de cambiar a tid:
+    //    NO leemos ni respondemos todavía (evita leer/responder el chat equivocado).
+    if (conflictsThread(tid)) {
+      log("[reply] panel aún no confirmado para", tid, "→ esperando swap del DOM");
+      return { done: false, wait: 500 };
+    }
+
     // Tomar último mensaje visible
     const { text, dir, hash } = getLastBubbleInfo();
     if (!text || isLikelySystem(text)) {
@@ -1007,8 +1238,12 @@
       return { done: true };
     }
 
-    // En chats normales exigimos dir === "in"; en Marketplace relajamos esa condición
-    if (dir === "out") return { done: true };
+    // El último mensaje es del bot (su propia respuesta): ya respondió.
+    // Reseteamos el "ya atendido" para que el PRÓXIMO entrante (aunque diga lo mismo) sea nuevo.
+    if (dir === "out") {
+      await S.set(lastIncomingHashKey(tid), "");
+      return { done: true };
+    }
 
     // ¿ya atendido este mensaje?
     const lastIn = await S.get(lastIncomingHashKey(tid), "");
@@ -1028,6 +1263,13 @@
     if (now() < operatorTypingUntil) {
       log("[reply] operador escribiendo, posponiendo auto-respuesta", tid);
       return { done: false, wait: 1200 };
+    }
+
+    // 🛡️ Throttle GLOBAL por cuenta: evita ráfagas de envíos entre chats distintos
+    if (now() < globalSendReadyAt) {
+      const wait = globalSendReadyAt - now();
+      log("[reply] throttle global activo, esperando", wait, "ms antes de responder", tid);
+      return { done: false, wait: Math.max(500, wait) };
     }
 
     const trackedHash = await S.get(lastTrackedIncomingKey(tid), "");
@@ -1183,8 +1425,12 @@
       }
     }
 
-    // Verificación adicional: si es "out" lo ignoramos siempre
+    // Verificación adicional: si es "out" lo ignoramos siempre.
+    // Además: como el bot ya respondió, reseteamos el "ya atendido" y marcamos esta burbuja
+    // como vista, para que el PRÓXIMO entrante (aunque diga lo mismo) se trate como nuevo.
     if (dir === "out") {
+      await S.set(lastIncomingHashKey(tid), "");
+      lastBubbleHashMem.set(tid, hash);
       log("[active-chat] mensaje es 'out', ignorando");
       return;
     }
@@ -1385,10 +1631,15 @@
     if (queue.length && !processing) processQueueSoon();
     await processScheduledFollowups();
 
-    // 4) ✅ Auto-navegación: SÍ abrir no leídos automáticamente para procesarlos
-    if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && unreadTids.length) {
-      log("[tick] Abriendo hilo no leído automáticamente:", unreadTids[0]);
-      openThreadById(unreadTids[0]);
+    // 4) Auto-navegación: abrir un NO leído (DISTINTO del activo) para procesarlo.
+    //    Con enfriamiento + exclusión del chat activo para no entrar en bucle si no se resuelve.
+    if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && now() >= autoNavCooldownUntil) {
+      const target = unreadTids.find(t => t && t !== activeTid && !inFlightPerThread.has(t));
+      if (target) {
+        autoNavCooldownUntil = now() + CFG.AUTO_NAV_COOLDOWN_MS;
+        log("[tick] Abriendo hilo no leído automáticamente:", target);
+        openThreadById(target);
+      }
     }
   };
 
@@ -1464,6 +1715,9 @@
         const sentForIncomingAt = Number(progress[fu.id] || 0);
         if (sentForIncomingAt >= lastIncomingAt) continue;
 
+        // 🛡️ Respeta el throttle global por cuenta también para los seguimientos
+        if (now() < globalSendReadyAt) return;
+
         const ok = await sendFollowupForThread(tid, String(fu.text || ""));
         if (!ok) continue;
 
@@ -1494,6 +1748,67 @@
     await S.set(k.rules, JSON.stringify(rules, null, 2));
     log("[rules] guardadas/recompiladas");
   };
+
+  /* ===== Ajustes configurables desde la UI ===== */
+  // Mapea cada clave de la UI a un campo de CFG y su factor de escala (segundos→ms, o 1 para conteos)
+  const SETTINGS_MAP = {
+    replyDelayMin:  ["HUMAN_REPLY_DELAY_MIN_MS", 1000],
+    replyDelayMax:  ["HUMAN_REPLY_DELAY_MAX_MS", 1000],
+    globalGapMin:   ["GLOBAL_SEND_MIN_GAP_MS", 1000],
+    globalGapMax:   ["GLOBAL_SEND_MAX_GAP_MS", 1000],
+    renewPerPass:   ["RENEW_MAX_ACTIONS_PER_PASS", 1],
+    renewActionMin: ["RENEW_ACTION_DELAY_MIN_MS", 1000],
+    renewActionMax: ["RENEW_ACTION_DELAY_MAX_MS", 1000],
+    renewDailyMax:  ["RENEW_DAILY_MAX_ACTIONS", 1],
+  };
+
+  // Aplica en caliente los ajustes guardados sobre CFG (no requiere recargar)
+  const applySettingsToCfg = (s) => {
+    if (!s || typeof s !== "object") return;
+    for (const key in SETTINGS_MAP) {
+      if (s[key] == null) continue;
+      const [cfgKey, scale] = SETTINGS_MAP[key];
+      const num = Number(s[key]);
+      if (!Number.isFinite(num) || num < 0) continue;
+      CFG[cfgKey] = Math.round(num * scale);
+    }
+  };
+
+  // Devuelve los valores actuales en unidades de UI (segundos / conteos) + la URL de la hoja
+  const getSettings = async () => {
+    const saved = (await S.get(SETTINGS_KEY, null)) || {};
+    const out = {};
+    for (const key in SETTINGS_MAP) {
+      const [cfgKey, scale] = SETTINGS_MAP[key];
+      out[key] = saved[key] != null ? Number(saved[key]) : (CFG[cfgKey] / scale);
+    }
+    out.sheetUrl = String(saved.sheetUrl || "");
+    return out;
+  };
+
+  // Sanea, garantiza min<=max por par, persiste (fusionando con lo previo) y aplica
+  const saveSettings = async (obj) => {
+    const clean = {};
+    for (const key in SETTINGS_MAP) {
+      const num = Number(obj?.[key]);
+      if (Number.isFinite(num) && num >= 0) clean[key] = num;
+    }
+    const pairs = [["replyDelayMin","replyDelayMax"],["globalGapMin","globalGapMax"],["renewActionMin","renewActionMax"]];
+    for (const [mn, mx] of pairs) {
+      if (clean[mn] != null && clean[mx] != null && clean[mn] > clean[mx]) clean[mx] = clean[mn];
+    }
+    if (obj && typeof obj.sheetUrl === "string") clean.sheetUrl = obj.sheetUrl.trim();
+
+    // Fusiona con lo ya guardado para no borrar campos no enviados
+    const prev = (await S.get(SETTINGS_KEY, null)) || {};
+    const merged = { ...prev, ...clean };
+    await S.set(SETTINGS_KEY, merged);
+    applySettingsToCfg(merged);
+    sheetWebhookUrl = String(merged.sheetUrl || "");
+    log("[settings] guardados y aplicados", merged);
+    return merged;
+  };
+
   const bindUI = () => {
     if (!window.VZUI) return;
     window.VZUI.injectTopBar({
@@ -1511,7 +1826,11 @@
       onGoRenew: () => {
         setRenewFinishedState(false);
         location.href = "https://www.facebook.com/marketplace/selling/renew_listings/";
-      }
+      },
+      onOpenSettings: () => window.VZUI.openSettingsModal({
+        loadSettings: () => getSettings(),
+        saveSettings: (obj) => saveSettings(obj)
+      })
     });
   };
 
@@ -1525,6 +1844,13 @@
       rules = DEFAULT_RULES.slice();
     }
     compiledRules = compileAll(rules);
+
+    // Carga y aplica los ajustes guardados por el usuario sobre CFG (+ URL de la hoja)
+    try {
+      const savedSettings = (await S.get(SETTINGS_KEY, null)) || {};
+      applySettingsToCfg(savedSettings);
+      sheetWebhookUrl = String(savedSettings.sheetUrl || "");
+    } catch {}
 
     bindUI();
     if (!isAutomationPage()) return;
@@ -1547,7 +1873,8 @@
     watchURL();
 
     if (!scanTimer) scanTimer = setInterval(tick, CFG.SCAN_EVERY_MS);
-    log("Bot listo v2.12.0 (ACTUALIZADO: soporte para facebook.com/messages). Hilo:", currentTid, "Baseline establecida");
+    const ver = (() => { try { return chrome?.runtime?.getManifest?.().version || "?"; } catch { return "?"; } })();
+    log("Bot listo v" + ver + ". Hilo:", currentTid, "Baseline establecida");
   };
 
   if (document.readyState === "loading") {

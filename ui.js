@@ -37,9 +37,9 @@
   .vz2-btn.pr{background:#059669}
   .vz2-btn.info{background:#0e7490}
   .vz2-btn.warn{background:#b91c1c}
-  .vz2-bd{padding:14px;overflow:auto;min-height:0}
-  .vz2-grid{display:flex;flex-direction:column;gap:12px;align-items:center}
-  .vz2-card{background:#0f172a;border:1px solid rgba(148,163,184,.22);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;width:min(500px,100%);position:relative;cursor:pointer;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;animation:vz2CardIn .24s ease both;overflow:visible}
+  .vz2-bd{padding:14px;overflow:auto;min-height:240px}
+  .vz2-grid{display:flex;flex-direction:column;gap:12px;align-items:stretch}
+  .vz2-card{background:#0f172a;border:1px solid rgba(148,163,184,.22);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;width:100%;box-sizing:border-box;position:relative;cursor:pointer;transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;animation:vz2CardIn .24s ease both;overflow:visible}
   .vz2-card.menu-open{z-index:40}
   .vz2-card:hover{border-color:rgba(56,189,248,.55);box-shadow:0 0 0 1px rgba(56,189,248,.18) inset;transform:translateY(-1px)}
   .vz2-cardHead{display:flex;align-items:center;gap:8px;justify-content:space-between}
@@ -98,6 +98,19 @@
 
   const UI_KEY = "__vz_rules_ui";
   let uiRules = [], panelOpen = false;
+
+  // Campos del panel de Ajustes (las claves min/max/single deben coincidir con SETTINGS_MAP en content.js)
+  const SETTINGS_GROUPS = [
+    { group:"Mensajes (Messenger)", icon:"&#128172;", rows:[
+      { label:"Demora antes de responder", unit:"s", min:"replyDelayMin", max:"replyDelayMax", lo:0, step:0.5 },
+      { label:"Pausa entre envíos (toda la cuenta)", unit:"s", min:"globalGapMin", max:"globalGapMax", lo:0, step:1 },
+    ]},
+    { group:"Marketplace (renovar)", icon:"&#128722;", rows:[
+      { label:"Acciones por pasada", single:"renewPerPass", lo:1, step:1 },
+      { label:"Espera entre acciones", unit:"s", min:"renewActionMin", max:"renewActionMax", lo:0, step:0.5 },
+      { label:"Tope de acciones por día", single:"renewDailyMax", lo:1, step:1 },
+    ]},
+  ];
 
   const templates = [
     { label:"Saludo",     prefill:{ enabled:true, mode:"Contiene", text:"hola",     words:["hola","buenas","saludos"], rawRegex:"", reply:"Hola! Cuentame un poco mas para ayudarte." } },
@@ -158,7 +171,7 @@
           de cada elemento y le suma BAR_H de forma incremental.
           Asi header1 (0→44) y nav (56→100) se compensan ambos.
   ══════════════════════════════════════════════════════════════ */
-  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking, onGoMessenger, onGoRenew }) {
+  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking, onGoMessenger, onGoRenew, onOpenSettings }) {
     const BAR_ID    = "vz-topbar";
     const SPACER_ID = "vz-topbar-spacer";
     const STYLE_ID  = "vz-topbar-style";
@@ -253,6 +266,7 @@
     };
     const btnRules    = mkBtn("Reglas",      "#4c1d95", "#7c3aed"); btnRules.onclick    = () => onOpenRules?.();
     const btnTracking = mkBtn("Seguimiento", "#0c4a6e", "#0e7490"); btnTracking.onclick = () => onOpenTracking?.();
+    const btnSettings = mkBtn("Ajustes",     "#334155", "#64748b"); btnSettings.onclick = () => onOpenSettings?.();
     const goTo = (url) => { try { location.href = url; } catch { window.open(url, "_self"); } };
     const btnMessenger = mkBtn("Messenger", "#1d4ed8", "#3b82f6");
     btnMessenger.onclick = () => onGoMessenger?.() ?? goTo("https://www.facebook.com/messages/");
@@ -264,21 +278,28 @@
     Object.assign(helper.style, { color:"#cbd5e1", fontSize:"12px", fontWeight:"600", marginRight:"2px", flexShrink:"0" });
 
     if (isAutomationPage) {
-      bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, sep(), helper);
+      bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, btnSettings, sep(), helper);
       if (!isMessagesPage) bar.append(btnMessenger);
       if (!isRenewPage) bar.append(btnRenew);
     } else {
-      bar.append(brand, sep(), helper, btnMessenger, btnRenew);
+      bar.append(brand, sep(), helper, btnMessenger, btnRenew, sep(), btnSettings);
     }
     document.documentElement.appendChild(bar); // fuera del body
 
-    /* Observer: guarda top original y suma BAR_H a cada header fixed/sticky */
+    /* Observer: guarda top original y suma BAR_H a cada header fixed/sticky.
+       OPTIMIZADO: el escaneo completo (caro: getComputedStyle sobre miles de
+       nodos) se hace como mucho cada FULL_SCAN_EVERY_MS. Entre medias solo se
+       reajusta el puñado de headers ya detectados, separando la fase de LECTURA
+       de la de ESCRITURA para no provocar "layout thrashing". */
     const OUR_IDS  = new Set([BAR_ID, SPACER_ID, STYLE_ID]);
     const origTops = new WeakMap();
+    const trackedFixed = new Set();        // headers fixed/sticky que compensamos
+    const FULL_SCAN_EVERY_MS = 800;
+    let lastFullScanAt = 0;
 
-    const compensate = () => {
-      if (!document.getElementById(SPACER_ID)) insertSpacer();
-
+    // Escaneo completo (caro): detecta qué elementos son fixed/sticky y los memoriza.
+    const fullScan = () => {
+      lastFullScanAt = Date.now();
       const els = document.querySelectorAll("div,nav,header,aside,section,ul");
       for (const el of els) {
         if (OUR_IDS.has(el.id)) continue;
@@ -286,36 +307,48 @@
 
         const cs = window.getComputedStyle(el);
         if (cs.position !== "fixed" && cs.position !== "sticky") continue;
-        if (cs.display  === "none") continue;
+        if (cs.display === "none") continue;
 
-        // Guardar top original la PRIMERA vez que vemos el elemento
         if (!origTops.has(el)) {
-          // Leer el valor del atributo data si ya lo marcamos antes
           const saved = el.getAttribute("data-vz-orig");
           if (saved !== null) {
             origTops.set(el, parseFloat(saved));
           } else {
             const raw = parseFloat(cs.top) || 0;
-            // Solo guardar si aun no esta compensado por nosotros
             const orig = raw >= BAR_H ? raw - BAR_H : raw;
             origTops.set(el, orig);
             el.setAttribute("data-vz-orig", String(orig));
           }
         }
-
-        const orig      = origTops.get(el);
-        const targetTop = orig + BAR_H;
-        const current   = parseFloat(cs.top) || 0;
-
-        // Actuar solo si el elemento esta visualmente en los primeros 400px
-        const rect = el.getBoundingClientRect();
-        if (rect.bottom < 0) continue;
-        if (rect.top > 400)  continue;
-
-        if (Math.abs(current - targetTop) > 2) {
-          el.style.setProperty("top", targetTop + "px", "important");
-        }
+        trackedFixed.add(el);
       }
+    };
+
+    // Reajuste frecuente (barato): solo sobre el set ya detectado, leyendo todo antes de escribir.
+    const applyTops = () => {
+      const writes = [];
+      for (const el of [...trackedFixed]) {
+        if (!el.isConnected) { trackedFixed.delete(el); continue; }
+        const cs = window.getComputedStyle(el);
+        if (cs.display === "none") continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom < 0 || rect.top > 400) continue; // solo headers cerca del tope
+        const orig = origTops.get(el) || 0;
+        const targetTop = orig + BAR_H;
+        const current = parseFloat(cs.top) || 0;
+        if (Math.abs(current - targetTop) > 2) writes.push([el, targetTop]);
+      }
+      for (const [el, targetTop] of writes) {
+        el.style.setProperty("top", targetTop + "px", "important");
+      }
+    };
+
+    const compensate = () => {
+      if (!document.getElementById(SPACER_ID)) insertSpacer();
+      if (!trackedFixed.size || Date.now() - lastFullScanAt > FULL_SCAN_EVERY_MS) {
+        fullScan();
+      }
+      applyTops();
     };
 
     let rafPending = false;
@@ -410,8 +443,18 @@
         const menuBtn=Q(".vz2-menuBtn",card),menu=Q(".vz2-menu",card);
         menuBtn.onclick=(e)=>{
           e.stopPropagation();
-          QA(".vz2-menu.open",grid).forEach(m=>{if(m!==menu){m.classList.remove("open");m.closest(".vz2-card")?.classList.remove("menu-open");}});
+          QA(".vz2-menu.open",grid).forEach(m=>{if(m!==menu){m.classList.remove("open");m.closest(".vz2-card")?.classList.remove("menu-open");m.style.top="";m.style.bottom="";}});
           menu.classList.toggle("open");card.classList.toggle("menu-open",menu.classList.contains("open"));
+          // Si no hay espacio debajo (última tarjeta), abre el menú hacia arriba para que no se recorte
+          if(menu.classList.contains("open")){
+            menu.style.top="";menu.style.bottom="";
+            requestAnimationFrame(()=>{
+              const bd=menu.closest(".vz2-bd");
+              const mr=menu.getBoundingClientRect();
+              const br=bd?.getBoundingClientRect();
+              if(br&&mr.bottom>br.bottom-4){menu.style.top="auto";menu.style.bottom="46px";}
+            });
+          }
         };
         Q('[data-action="toggle"]',card).onclick=async(e)=>{e.stopPropagation();uiRules[i].enabled=!uiRules[i].enabled;await publishRules();render();};
         Q('[data-action="delete"]',card).onclick=async(e)=>{e.stopPropagation();if(!confirm("Eliminar esta regla?"))return;uiRules.splice(i,1);await publishRules();render();};
@@ -431,11 +474,13 @@
             <div class="vz2-sp"></div><button class="vz2-btn" data-close>Cerrar</button>
           </div>
           <div class="vz2-pbd">
-            <div class="vz2-field"><div class="vz2-label">Nombre</div><input class="vz2-input" data-name placeholder="Ej: Regla de saludo"></div>
-            <div class="vz2-row"><input type="checkbox" data-enabled><span class="vz2-label">Regla activa</span></div>
-            <div class="vz2-field"><div class="vz2-label">Modo</div>
-              <select class="vz2-select" data-mode><option>Cualquiera</option><option>Contiene</option><option>Igual a</option><option>Empieza</option><option>Termina</option></select>
+            <div class="vz2-row" style="align-items:flex-end">
+              <div class="vz2-field" style="flex:1"><div class="vz2-label">Nombre</div><input class="vz2-input" data-name placeholder="Ej: Regla de saludo"></div>
+              <div class="vz2-field" style="min-width:170px"><div class="vz2-label">Modo</div>
+                <select class="vz2-select" data-mode><option>Cualquiera</option><option>Contiene</option><option>Igual a</option><option>Empieza</option><option>Termina</option></select>
+              </div>
             </div>
+            <div class="vz2-row"><input type="checkbox" data-enabled><span class="vz2-label">Regla activa</span></div>
             <div class="vz2-field">
               <div class="vz2-label" data-pattern-label>Patron / condicion</div>
               <div class="vz2-row"><input class="vz2-input" data-pattern placeholder="Ej: precio" style="flex:1"><button class="vz2-btn" data-pattern-add>+</button></div>
@@ -581,6 +626,154 @@
     document.documentElement.append(wrap);setTab(activeTab);await render();
   }
 
+  /* ══════════════════════════════════════════════════════════════
+     openSettingsModal — tiempos y topes anti-bloqueo configurables
+  ══════════════════════════════════════════════════════════════ */
+  function ensureSettingsCss(){
+    cssOnce("vz-settings-css", `
+      .vz2-set-pbd{padding:16px 16px 0;display:flex;flex-direction:column;gap:14px;overflow:auto}
+      .vz2-set-group{background:#0b1220;border:1px solid rgba(148,163,184,.18);border-radius:14px;padding:6px 14px 12px}
+      .vz2-set-gtitle{display:flex;align-items:center;gap:8px;font:700 12px/1 'Poppins',system-ui;color:#7dd3fc;letter-spacing:.4px;text-transform:uppercase;padding:12px 0 6px}
+      .vz2-set-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 0;border-top:1px solid rgba(148,163,184,.08)}
+      .vz2-set-rlabel{font:600 13px/1.3 system-ui;color:#e2e8f0}
+      .vz2-set-ctrl{display:flex;align-items:center;gap:7px;flex:0 0 auto}
+      .vz2-set-num{width:72px;text-align:center;background:#0f172a;color:#f1f5f9;border:1px solid rgba(148,163,184,.3);border-radius:9px;padding:8px 6px;font:600 13px system-ui;outline:none;transition:border-color .15s,box-shadow .15s;-moz-appearance:textfield}
+      .vz2-set-num::-webkit-outer-spin-button,.vz2-set-num::-webkit-inner-spin-button{opacity:.4}
+      .vz2-set-num:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+      .vz2-set-dash{color:#475569;font-weight:700}
+      .vz2-set-unit{color:#94a3b8;font:600 12px system-ui;min-width:10px}
+      .vz2-set-note{display:flex;gap:8px;align-items:flex-start;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.22);border-radius:10px;padding:10px 12px;color:#9cc7e0;font:500 12px/1.45 system-ui}
+      .vz2-set-foot{position:sticky;bottom:0;display:flex;gap:8px;justify-content:flex-end;padding:14px 16px;margin-top:2px;background:linear-gradient(180deg,rgba(15,23,42,0),#0f172a 40%);border-top:1px solid rgba(148,163,184,.12)}
+      .vz2-steps{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:9px;color:#cbd5e1;font:500 12.5px/1.5 system-ui}
+      .vz2-steps li{padding-left:2px}
+      .vz2-steps a{color:#7dd3fc;text-decoration:none}
+      .vz2-steps a:hover{text-decoration:underline}
+      .vz2-code-head{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+      .vz2-code{background:#020617;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:10px 12px;margin-top:6px;color:#cbd5e1;font:500 11px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;max-height:190px}
+      .vz2-set-url{width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid rgba(148,163,184,.3);border-radius:9px;padding:9px 10px;font:500 12.5px system-ui;outline:none}
+      .vz2-set-url:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+    `);
+  }
+
+  // Código de Apps Script que el usuario pega en su hoja (mostrado y copiable)
+  const SHEET_SCRIPT = `function doPost(e) {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+  const d = JSON.parse(e.postData.contents);
+  if (hoja.getLastRow() === 0) {
+    hoja.appendRow(["Fecha", "Chat (tid)", "Tipo", "Regla", "Texto"]);
+  }
+  hoja.appendRow([new Date(), d.tid || "", d.tipo || "", d.regla || "", d.texto || ""]);
+  return ContentService.createTextOutput(JSON.stringify({ ok: true }))
+    .setMimeType(ContentService.MimeType.JSON);
+}`;
+
+  async function openSettingsModal({ loadSettings, saveSettings }){
+    ensureSettingsCss();
+    Q("#vz2-settings-root")?.remove();
+    const current = (await loadSettings()) || {};
+    const esc=(s)=>String(s).replace(/[&<>"']/g,(m)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":'&#39;'}[m]));
+    const num=(k)=>Number(current[k] ?? 0);
+    const numInput=(key,row)=>`<input class="vz2-set-num" type="number" min="${row.lo}" step="${row.step}" data-skey="${esc(key)}" value="${num(key)}">`;
+
+    const rowHtml=(row)=>{
+      const ctrl = row.single
+        ? `${numInput(row.single,row)}<span class="vz2-set-unit">${esc(row.unit||"")}</span>`
+        : `${numInput(row.min,row)}<span class="vz2-set-dash">&ndash;</span>${numInput(row.max,row)}<span class="vz2-set-unit">${esc(row.unit||"")}</span>`;
+      return `<div class="vz2-set-row"><div class="vz2-set-rlabel">${esc(row.label)}</div><div class="vz2-set-ctrl">${ctrl}</div></div>`;
+    };
+    const groupsHtml = SETTINGS_GROUPS.map(g=>`
+      <div class="vz2-set-group">
+        <div class="vz2-set-gtitle">${g.icon||""} ${esc(g.group)}</div>
+        ${g.rows.map(rowHtml).join("")}
+      </div>`).join("");
+
+    const sheetHtml = `
+      <div class="vz2-set-group">
+        <div class="vz2-set-gtitle">&#128202; Conectar Google Sheet</div>
+        <ol class="vz2-steps">
+          <li>Crea una hoja en <a href="https://sheets.google.com" target="_blank">sheets.google.com</a>.</li>
+          <li>En el menú: <b>Extensiones &rarr; Apps Script</b>.</li>
+          <li>Borra lo que haya y pega este código:
+            <div class="vz2-code-head"><span></span><button class="vz2-btn info" data-copy-code style="padding:4px 10px;font-size:11px">Copiar código</button></div>
+            <pre class="vz2-code" data-code>${esc(SHEET_SCRIPT)}</pre>
+          </li>
+          <li><b>Implementar &rarr; Nueva implementación &rarr; Aplicación web</b>. En "Quién tiene acceso" elige <b>Cualquier usuario</b>, implementa y autoriza.</li>
+          <li>Copia la URL que termina en <b>/exec</b> y pégala abajo.</li>
+        </ol>
+      </div>
+      <div class="vz2-set-group">
+        <div class="vz2-set-gtitle">&#128279; URL del Web App</div>
+        <div style="padding:8px 0 4px"><input class="vz2-set-url" data-sheet-url placeholder="https://script.google.com/macros/s/.../exec" value="${esc(current.sheetUrl||"")}"></div>
+        <div style="display:flex;justify-content:flex-end;padding-top:8px"><button class="vz2-btn info" data-test-sheet>Enviar fila de prueba</button></div>
+        <div class="vz2-set-note" style="margin-top:8px"><span>&#128274;</span><span>Deja el campo vacío para desactivar el envío. Tu hoja contiene <b>mensajes de personas reales</b>: mantenla privada (solo tú).</span></div>
+      </div>`;
+
+    const wrap=document.createElement("div");wrap.id="vz2-settings-root";wrap.className="vz2-modal";
+    wrap.innerHTML=`
+      <div class="vz2-panel" style="display:flex;flex-direction:column;padding:0">
+        <div class="vz2-phd">
+          <div class="vz2-title"><span class="vz2-titleIcon">&#9881;</span>Ajustes</div>
+          <div class="vz2-sp"></div>
+          <div class="vz2-tabs">
+            <button class="vz2-tab active" data-stab="antiblock">Anti-bloqueo</button>
+            <button class="vz2-tab" data-stab="sheet">Google Sheet</button>
+          </div>
+          <button class="vz2-iconBtn" data-close title="Cerrar" style="margin-left:8px">&times;</button>
+        </div>
+        <div class="vz2-set-pbd">
+          <div data-sview="antiblock">
+            ${groupsHtml}
+            <div class="vz2-set-note"><span>&#128161;</span><span>Tiempos en <b>segundos</b>. Valores más altos = más seguro (menos riesgo de bloqueo) pero más lento. Los cambios se aplican al instante, sin recargar.</span></div>
+          </div>
+          <div data-sview="sheet" style="display:none">${sheetHtml}</div>
+        </div>
+        <div class="vz2-set-foot">
+          <button class="vz2-btn" data-cancel>Cancelar</button>
+          <button class="vz2-btn pr" data-save>Guardar cambios</button>
+        </div>
+      </div>`;
+
+    const close=()=>wrap.remove();
+    Q("[data-close]",wrap).onclick=close;
+    Q("[data-cancel]",wrap).onclick=close;
+    wrap.addEventListener("click",(e)=>{if(e.target===wrap)close();});
+
+    // Pestañas
+    const setStab=(t)=>{
+      QA("[data-stab]",wrap).forEach(b=>b.classList.toggle("active",b.getAttribute("data-stab")===t));
+      QA("[data-sview]",wrap).forEach(v=>v.style.display=(v.getAttribute("data-sview")===t?"":"none"));
+    };
+    QA("[data-stab]",wrap).forEach(b=>b.onclick=()=>setStab(b.getAttribute("data-stab")));
+
+    // Copiar código
+    Q("[data-copy-code]",wrap).onclick=async()=>{
+      const code=Q("[data-code]",wrap)?.textContent||"";
+      try{ await navigator.clipboard.writeText(code); }catch{
+        const ta=document.createElement("textarea");ta.value=code;document.body.append(ta);ta.select();try{document.execCommand("copy");}catch{}ta.remove();
+      }
+      const b=Q("[data-copy-code]",wrap);const t=b.textContent;b.textContent="¡Copiado!";setTimeout(()=>b.textContent=t,1400);
+    };
+
+    // Enviar fila de prueba a la hoja
+    Q("[data-test-sheet]",wrap).onclick=async()=>{
+      const url=String(Q("[data-sheet-url]",wrap).value||"").trim();
+      if(!/^https:\/\/script\.google\.com\/macros\//.test(url)){alert("Pega primero una URL válida del Web App (debe empezar con https://script.google.com/macros/ y terminar en /exec).");return;}
+      try{
+        await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({tid:"PRUEBA",tipo:"prueba",regla:"-",texto:"Fila de prueba desde NETMAGI"})});
+        alert("Fila enviada. Abre tu Google Sheet: debería aparecer una fila con 'PRUEBA'.\n\n(Por seguridad del navegador no podemos leer la respuesta, así que confírmalo en la hoja.)");
+      }catch(err){alert("No se pudo enviar: "+err);}
+    };
+
+    Q("[data-save]",wrap).onclick=async()=>{
+      const obj={};
+      QA("[data-skey]",wrap).forEach(inp=>{ obj[inp.getAttribute("data-skey")]=Number(inp.value); });
+      obj.sheetUrl=String(Q("[data-sheet-url]",wrap)?.value||"").trim();
+      await saveSettings(obj);
+      close();
+    };
+    document.documentElement.append(wrap);
+  }
+
   async function openRulesModal({ loadRules, saveRules }){ openRulesPanelV2({ loadRules, saveRules }); }
-  window.VZUI = { injectTopBar, openRulesModal, openTrackingModal };
+  window.VZUI = { injectTopBar, openRulesModal, openTrackingModal, openSettingsModal };
 })();
