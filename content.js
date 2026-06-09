@@ -936,6 +936,20 @@
     return Q('[role="main"] [role="grid"]') || Q('[role="main"]') || document.body;
   };
 
+  // 🔽 Baja el chat hasta el fondo para que el ÚLTIMO mensaje sea siempre el más reciente.
+  //    Sin esto, si el chat no está scrolleado abajo, el bot puede leer su propia respuesta
+  //    vieja como si fuera el último mensaje (y creer que no hay nada nuevo). Si ya está
+  //    abajo, asignar scrollTop = scrollHeight no hace nada (sin parpadeo).
+  const scrollThreadToBottom = () => {
+    try {
+      let el = getThreadGridRoot();
+      for (let i = 0; i < 6 && el && el !== document.body; i++) {
+        if (el.scrollHeight > el.clientHeight + 20) { el.scrollTop = el.scrollHeight; return; }
+        el = el.parentElement;
+      }
+    } catch {}
+  };
+
   // 🔁 Plan B (p.ej. Marketplace): sin "filas" reconocibles, deduce el último mensaje
   //    tomando el texto dir="auto" visualmente MÁS ABAJO del panel del hilo (= último mensaje).
   const getLastBubbleFallback = () => {
@@ -1151,7 +1165,13 @@
       log("[queue] tid en silence period desde sidebar, NO encolando:", tid);
       return;
     }
-    
+
+    // 🔑 Facebook marcó el chat como NO LEÍDO ⇒ hay un mensaje nuevo. Limpiamos el dedup
+    //    por si el texto coincide con uno ya respondido antes (ej. "hola" repetido),
+    //    para que SÍ se responda. La señal de "no leído" es más fiable que la huella del texto.
+    S.set(lastIncomingHashKey(tid), "");
+    log("[queue] no leído nuevo → dedup limpiado para responder:", tid);
+
     enqueueTid(tid, "sidebar-unread");
   };
 
@@ -1213,6 +1233,9 @@
       log("[reply] panel aún no confirmado para", tid, "→ esperando swap del DOM");
       return { done: false, wait: 500 };
     }
+
+    // 🔽 Aseguramos estar al fondo para leer el mensaje MÁS reciente (no una respuesta vieja)
+    scrollThreadToBottom();
 
     // Tomar último mensaje visible
     const { text, dir, hash } = getLastBubbleInfo();
@@ -1556,6 +1579,8 @@
       setTimeout(async () => {
         // Obtener hash actual después de que el DOM se estabilice
         await sleep(100);
+        scrollThreadToBottom(); // leer el mensaje más reciente, no una respuesta vieja
+        await sleep(120);
         const { hash: currentHash, dir: currentDir, text: currentText } = getLastBubbleInfo();
         
         log("[thread] ⚙️ Verificación post-apertura:");
@@ -1633,7 +1658,9 @@
 
     // 4) Auto-navegación: abrir un NO leído (DISTINTO del activo) para procesarlo.
     //    Con enfriamiento + exclusión del chat activo para no entrar en bucle si no se resuelve.
-    if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && now() >= autoNavCooldownUntil) {
+    //    NO navegamos si hay una respuesta programada (evita rebotar entre 2 chats y dejar a
+    //    medias el que estaba a punto de responder).
+    if (CFG.AUTO_NAVIGATE_ON_UNREAD === true && !queue.length && pendingReplyReadyAt.size === 0 && now() >= autoNavCooldownUntil) {
       const target = unreadTids.find(t => t && t !== activeTid && !inFlightPerThread.has(t));
       if (target) {
         autoNavCooldownUntil = now() + CFG.AUTO_NAV_COOLDOWN_MS;
