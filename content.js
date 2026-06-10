@@ -153,6 +153,98 @@
     } catch {}
   };
 
+  /* ===== Agente IA (opcional) — saludo con pregunta y contacto en el 2º mensaje ===== */
+  let aiEnabled = false;
+  let openaiKey = "";
+  let openaiModel = "gpt-4o-mini";
+  let aiMaxReplies = 5; // máximo de respuestas de la IA por chat (0 = sin límite)
+  let aiSystemPrompt = `Eres un agente de atención al cliente de Magilus por Facebook Marketplace.
+
+Reglas:
+- Nunca inventes precios, productos ni datos: todo lo que requiera detalle se gestiona por WhatsApp 304 648 1994.
+- El número siempre como texto, nunca como enlace (no uses "https").
+- No repitas el saludo de bienvenida.
+- Responde siempre breve y en español.
+
+Pasos:
+
+1. Siempre debes saludar con Primer mensaje (saludo):
+
+'Bienvenid@ a Magilus 👑
+
+¿Deseas este producto o quieres cotizar uno en particular?'
+
+2. Si el cliente muestra interés, o pregunta precio, valor, detalles o cualquier información del producto:
+¡Genial! 😊 Para brindarte una atención más rápida y personalizada, por favor escríbenos al WhatsApp. ✍️
+
+304 648 1994
+
+3. Si pregunta por ubicación, ciudad o dónde está la fábrica:
+Tenemos sede en Cali y Bogotá.
+¿Usted está en cuál ciudad? Así le confirmo si aplica despacho inmediato o fabricación.
+
+   Y si responde una ciudad distinta de Cali o Bogotá:
+Claro que sí, hacemos envío gratis a ciudades principales. Para confirmar, escríbenos por WhatsApp: 304 648 1994
+
+4. Si el mensaje no encaja en ningún paso anterior: responde breve y amable, sin inventar datos, e invítalo a escribir por WhatsApp: 304 648 1994`;
+
+  // Saludos de respaldo si la IA falla (sin key, sin red, error) — así el flujo nunca se rompe.
+  const DEFAULT_GREETINGS = [
+    "¡Hola! 😊 ¿En qué te puedo ayudar?",
+    "¡Hola! Cuéntame, ¿qué estás buscando?",
+    "¡Hola! 👋 ¿Sobre qué producto te gustaría saber?",
+    "¡Hola! Con gusto te ayudo. ¿Qué necesitas?"
+  ];
+  const pickGreeting = () => DEFAULT_GREETINGS[Math.floor(Math.random() * DEFAULT_GREETINGS.length)];
+
+  // Llama a la API de OpenAI (chat completions) con el historial de la conversación.
+  // Devuelve el texto o null si falla.
+  const callOpenAI = async (history) => {
+    if (!openaiKey) return null;
+    const model = openaiModel || "gpt-4o-mini";
+    const isReasoning = /^o\d/i.test(model); // o1 / o3 / o4-mini... usan otros parámetros
+    const msgs = [{ role: "system", content: aiSystemPrompt }];
+    for (const m of (Array.isArray(history) ? history : [])) {
+      if (m && (m.role === "user" || m.role === "assistant") && m.content) {
+        msgs.push({ role: m.role, content: String(m.content).slice(0, 600) });
+      }
+    }
+    const body = { model, messages: msgs };
+    if (isReasoning) {
+      body.max_completion_tokens = 200;
+    } else {
+      body.max_tokens = 150;
+      body.temperature = 0.8;
+    }
+    try {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        log("[ai] error HTTP", res.status, await res.text().catch(() => ""));
+        return null;
+      }
+      const data = await res.json();
+      const out = data?.choices?.[0]?.message?.content;
+      return out ? String(out).trim() : null;
+    } catch (e) {
+      log("[ai] fetch error", e);
+      return null;
+    }
+  };
+
+  // Aplica los ajustes del agente IA (guardados) a las variables en uso.
+  const applyAiSettings = (s) => {
+    if (!s || typeof s !== "object") return;
+    if (typeof s.aiEnabled === "boolean") aiEnabled = s.aiEnabled;
+    if (s.openaiKey != null) openaiKey = String(s.openaiKey);
+    if (s.openaiModel) openaiModel = String(s.openaiModel);
+    if (s.aiMaxReplies != null && Number.isFinite(Number(s.aiMaxReplies))) aiMaxReplies = Math.max(0, Math.floor(Number(s.aiMaxReplies)));
+    if (s.aiSystemPrompt != null && String(s.aiSystemPrompt).trim()) aiSystemPrompt = String(s.aiSystemPrompt);
+  };
+
   const emptyAnalytics = () => ({
     totals: {
       incoming: 0,
@@ -1123,6 +1215,39 @@
   const baselineHashKey     = (tid)=> k.byThread(tid,"baseline_hash");
   // ✅ NUEVO: Key para guardar contenido literal del último mensaje enviado
   const lastSentContentKey  = (tid)=> k.byThread(tid,"last_sent_content");
+  // Historial de la conversación con el agente IA por chat (memoria, para no re-saludar)
+  const aiHistoryKey        = (tid)=> k.byThread(tid,"ai_history");
+  // Nº de respuestas que la IA ya envió en este chat (para el tope por chat)
+  const aiReplyCountKey     = (tid)=> k.byThread(tid,"ai_reply_count");
+
+  // Agente IA con UN solo prompt + memoria por chat: la IA decide todo (saludo, preguntas,
+  // cuándo dar el contacto, seguir conversando) según las instrucciones que escribe el usuario.
+  const buildAiReply = async (tid, incomingText) => {
+    // Tope de respuestas por chat: si ya llegó al máximo, no responde más.
+    const replyCount = Number(await S.get(aiReplyCountKey(tid), 0));
+    if (aiMaxReplies > 0 && replyCount >= aiMaxReplies) {
+      log("[ai] tope de", aiMaxReplies, "respuestas por chat alcanzado:", tid);
+      return null;
+    }
+
+    let history = await S.get(aiHistoryKey(tid), []);
+    if (!Array.isArray(history)) history = [];
+    history.push({ role: "user", content: String(incomingText || "").slice(0, 600) });
+    if (history.length > 12) history = history.slice(-12);
+
+    let reply = await callOpenAI(history);
+    if (!reply) {
+      // Respaldo solo en el primer contacto (si la IA falla por key/red); luego, no respondemos.
+      const noBotYet = !history.some(m => m.role === "assistant");
+      if (noBotYet) reply = pickGreeting();
+      else return null;
+    }
+    history.push({ role: "assistant", content: reply });
+    if (history.length > 12) history = history.slice(-12);
+    await S.set(aiHistoryKey(tid), history);
+    await S.set(aiReplyCountKey(tid), replyCount + 1);
+    return { text: reply, label: "IA" };
+  };
 
   /* ===== Cola ===== */
 
@@ -1301,19 +1426,32 @@
       await S.set(lastTrackedIncomingKey(tid), hash);
     }
 
-    // Reglas
+    // Respuesta: por Agente IA (si está activo) o por Reglas
     let reply = null;
     let matchedRuleId = "fallback";
     let matchedRuleLabel = "Fallback";
-    for (const rule of compiledRules) {
-      if (rule.re.test(text)) {
-        reply = rule.reply;
-        matchedRuleId = rule.id;
-        matchedRuleLabel = rule.label;
-        break;
+    let aiNextStage = null;
+
+    if (aiEnabled) {
+      // Agente IA: 1º saludo con pregunta (sin contacto), 2º envía contacto, después nada.
+      const aiRes = await buildAiReply(tid, text);
+      if (aiRes && aiRes.text) {
+        reply = aiRes.text;
+        matchedRuleId = "ai";
+        matchedRuleLabel = aiRes.label || "IA";
+        aiNextStage = aiRes.stage;
       }
+    } else {
+      for (const rule of compiledRules) {
+        if (rule.re.test(text)) {
+          reply = rule.reply;
+          matchedRuleId = rule.id;
+          matchedRuleLabel = rule.label;
+          break;
+        }
+      }
+      if (!reply && CFG.DEFAULT_FALLBACK) reply = CFG.DEFAULT_FALLBACK;
     }
-    if (!reply && CFG.DEFAULT_FALLBACK) reply = CFG.DEFAULT_FALLBACK;
 
     if (!reply) {
       clearPendingReplyDelay(tid);
@@ -1339,6 +1477,7 @@
       await S.set(lastIncomingHashKey(tid), handledIncomingHash);
       await S.set(lastSentHashKey(tid), thisHash);
       await S.set(lastSentContentKey(tid), reply);
+      if (aiNextStage != null) await S.set(aiStageKey(tid), aiNextStage); // avanza la etapa del agente IA
       await trackReply(tid, matchedRuleId, matchedRuleLabel, reply);
       
       lastBubbleHashMem.set(tid, newBubbleHash);
@@ -1810,6 +1949,11 @@
       out[key] = saved[key] != null ? Number(saved[key]) : (CFG[cfgKey] / scale);
     }
     out.sheetUrl = String(saved.sheetUrl || "");
+    out.aiEnabled = !!saved.aiEnabled;
+    out.openaiKey = String(saved.openaiKey || "");
+    out.openaiModel = String(saved.openaiModel || openaiModel);
+    out.aiMaxReplies = Number(saved.aiMaxReplies != null ? saved.aiMaxReplies : aiMaxReplies);
+    out.aiSystemPrompt = String(saved.aiSystemPrompt || aiSystemPrompt); // vacío → vuelve al prompt por defecto
     return out;
   };
 
@@ -1825,6 +1969,12 @@
       if (clean[mn] != null && clean[mx] != null && clean[mn] > clean[mx]) clean[mx] = clean[mn];
     }
     if (obj && typeof obj.sheetUrl === "string") clean.sheetUrl = obj.sheetUrl.trim();
+    // Campos del agente IA
+    if (obj && typeof obj.aiEnabled === "boolean") clean.aiEnabled = obj.aiEnabled;
+    if (obj && typeof obj.openaiKey === "string") clean.openaiKey = obj.openaiKey.trim();
+    if (obj && typeof obj.openaiModel === "string") clean.openaiModel = obj.openaiModel.trim();
+    if (obj && obj.aiMaxReplies != null && Number.isFinite(Number(obj.aiMaxReplies))) clean.aiMaxReplies = Math.max(0, Math.floor(Number(obj.aiMaxReplies)));
+    if (obj && typeof obj.aiSystemPrompt === "string") clean.aiSystemPrompt = obj.aiSystemPrompt;
 
     // Fusiona con lo ya guardado para no borrar campos no enviados
     const prev = (await S.get(SETTINGS_KEY, null)) || {};
@@ -1832,6 +1982,7 @@
     await S.set(SETTINGS_KEY, merged);
     applySettingsToCfg(merged);
     sheetWebhookUrl = String(merged.sheetUrl || "");
+    applyAiSettings(merged);
     log("[settings] guardados y aplicados", merged);
     return merged;
   };
@@ -1857,6 +2008,10 @@
       onOpenSettings: () => window.VZUI.openSettingsModal({
         loadSettings: () => getSettings(),
         saveSettings: (obj) => saveSettings(obj)
+      }),
+      onOpenAi: () => window.VZUI.openAiModal({
+        loadSettings: () => getSettings(),
+        saveSettings: (obj) => saveSettings(obj)
       })
     });
   };
@@ -1877,6 +2032,7 @@
       const savedSettings = (await S.get(SETTINGS_KEY, null)) || {};
       applySettingsToCfg(savedSettings);
       sheetWebhookUrl = String(savedSettings.sheetUrl || "");
+      applyAiSettings(savedSettings);
     } catch {}
 
     bindUI();

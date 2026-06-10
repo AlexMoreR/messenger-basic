@@ -6,7 +6,8 @@
   "permissions": ["storage"],
   "host_permissions": [
     "*://*.facebook.com/*",
-    "https://script.google.com/*"
+    "https://script.google.com/*",
+    "https://api.openai.com/*"
   ],
   "content_scripts": [
     {

@@ -171,7 +171,7 @@
           de cada elemento y le suma BAR_H de forma incremental.
           Asi header1 (0→44) y nav (56→100) se compensan ambos.
   ══════════════════════════════════════════════════════════════ */
-  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking, onGoMessenger, onGoRenew, onOpenSettings }) {
+  function injectTopBar({ getEnabled, setEnabled, onOpenRules, onOpenTracking, onGoMessenger, onGoRenew, onOpenSettings, onOpenAi }) {
     const BAR_ID    = "vz-topbar";
     const SPACER_ID = "vz-topbar-spacer";
     const STYLE_ID  = "vz-topbar-style";
@@ -252,6 +252,7 @@
       btnToggle.style.background  = next ? "#065f46" : "#374151";
       btnToggle.style.borderColor = next ? "#10b981" : "#6b7280";
     };
+    const btnAI       = mkBtn("Agente IA",   "#4338ca", "#6366f1"); btnAI.onclick       = () => onOpenAi?.();
     const btnRules    = mkBtn("Reglas",      "#4c1d95", "#7c3aed"); btnRules.onclick    = () => onOpenRules?.();
     const btnTracking = mkBtn("Seguimiento", "#0c4a6e", "#0e7490"); btnTracking.onclick = () => onOpenTracking?.();
     const btnSettings = mkBtn("Ajustes",     "#334155", "#64748b"); btnSettings.onclick = () => onOpenSettings?.();
@@ -266,11 +267,11 @@
     Object.assign(helper.style, { color:"#cbd5e1", fontSize:"12px", fontWeight:"600", marginRight:"2px", flexShrink:"0" });
 
     if (isAutomationPage) {
-      bar.append(brand, sep(), status, sep(), btnToggle, btnRules, btnTracking, btnSettings, sep(), helper);
+      bar.append(brand, sep(), status, sep(), btnToggle, btnAI, btnRules, btnTracking, btnSettings, sep(), helper);
       if (!isMessagesPage) bar.append(btnMessenger);
       if (!isRenewPage) bar.append(btnRenew);
     } else {
-      bar.append(brand, sep(), helper, btnMessenger, btnRenew, sep(), btnSettings);
+      bar.append(brand, sep(), helper, btnMessenger, btnRenew, sep(), btnAI, btnSettings);
     }
     document.documentElement.appendChild(bar); // fuera del body
 
@@ -785,6 +786,69 @@
     document.documentElement.append(wrap);
   }
 
+  /* ══════════════════════════════════════════════════════════════
+     openAiModal — agente IA (saludo con pregunta + contacto en 2º mensaje)
+  ══════════════════════════════════════════════════════════════ */
+  async function openAiModal({ loadSettings, saveSettings }){
+    ensureSettingsCss();
+    Q("#vz2-ai-root")?.remove();
+    const current = (await loadSettings()) || {};
+    const esc=(s)=>String(s).replace(/[&<>"']/g,(m)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":'&#39;'}[m]));
+
+    const aiHtml = `
+      <div class="vz2-set-group">
+        <div class="vz2-set-row" style="border-top:0">
+          <div class="vz2-set-ctrl"><input type="checkbox" data-ai-enabled ${current.aiEnabled?"checked":""}><span class="vz2-set-rlabel">Activar agente IA</span></div>
+          <div class="vz2-set-ctrl"><span class="vz2-set-rlabel">Modelo</span><input class="vz2-set-url" data-ai-model style="width:150px" value="${esc(current.openaiModel||"gpt-4o-mini")}"></div>
+        </div>
+        <div class="vz2-set-row">
+          <div class="vz2-set-rlabel">Máx. respuestas por chat</div>
+          <div class="vz2-set-ctrl"><input class="vz2-set-num" type="number" min="0" step="1" data-ai-max style="width:72px" value="${Number(current.aiMaxReplies != null ? current.aiMaxReplies : 5)}"></div>
+        </div>
+      </div>
+      <div class="vz2-set-group">
+        <div class="vz2-set-gtitle">&#128273; API key de OpenAI</div>
+        <div style="padding:8px 0 4px"><input class="vz2-set-url" type="password" data-ai-key placeholder="sk-..." value="${esc(current.openaiKey||"")}"></div>
+        <div class="vz2-set-note" style="margin-top:8px"><span>&#128274;</span><span>La key se guarda <b>solo en tu navegador</b>. No compartas la extensión con la key dentro. La obtienes en platform.openai.com.</span></div>
+      </div>
+      <div class="vz2-set-group">
+        <div class="vz2-set-gtitle">&#128172; Instrucciones del agente</div>
+        <div style="padding:8px 0"><textarea class="vz2-ta" data-ai-prompt style="width:100%;box-sizing:border-box;min-height:160px">${esc(current.aiSystemPrompt||"")}</textarea></div>
+        <div class="vz2-set-note"><span>&#9888;&#65039;</span><span>Por seguridad, indícale que <b>no dé el contacto en el primer mensaje</b> y que dé el número <b>como texto</b> (sin enlaces). Ej: "...invítalo a escribir por WhatsApp al 304 648 1994...".</span></div>
+      </div>`;
+
+    const wrap=document.createElement("div");wrap.id="vz2-ai-root";wrap.className="vz2-modal";
+    wrap.innerHTML=`
+      <div class="vz2-panel" style="display:flex;flex-direction:column;padding:0">
+        <div class="vz2-phd">
+          <div class="vz2-title"><span class="vz2-titleIcon">&#129302;</span>Agente IA</div>
+          <div class="vz2-sp"></div>
+          <button class="vz2-iconBtn" data-close title="Cerrar">&times;</button>
+        </div>
+        <div class="vz2-set-pbd">${aiHtml}</div>
+        <div class="vz2-set-foot">
+          <button class="vz2-btn" data-cancel>Cancelar</button>
+          <button class="vz2-btn pr" data-save>Guardar cambios</button>
+        </div>
+      </div>`;
+
+    const close=()=>wrap.remove();
+    Q("[data-close]",wrap).onclick=close;
+    Q("[data-cancel]",wrap).onclick=close;
+    wrap.addEventListener("click",(e)=>{if(e.target===wrap)close();});
+    Q("[data-save]",wrap).onclick=async()=>{
+      const obj={};
+      obj.aiEnabled=!!Q("[data-ai-enabled]",wrap)?.checked;
+      obj.openaiKey=String(Q("[data-ai-key]",wrap)?.value||"").trim();
+      obj.openaiModel=String(Q("[data-ai-model]",wrap)?.value||"").trim();
+      obj.aiMaxReplies=Number(Q("[data-ai-max]",wrap)?.value||5);
+      obj.aiSystemPrompt=String(Q("[data-ai-prompt]",wrap)?.value||"");
+      await saveSettings(obj);
+      close();
+    };
+    document.documentElement.append(wrap);
+  }
+
   async function openRulesModal({ loadRules, saveRules }){ openRulesPanelV2({ loadRules, saveRules }); }
-  window.VZUI = { injectTopBar, openRulesModal, openTrackingModal, openSettingsModal };
+  window.VZUI = { injectTopBar, openRulesModal, openTrackingModal, openSettingsModal, openAiModal };
 })();
