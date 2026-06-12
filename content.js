@@ -8,8 +8,8 @@
     AUTO_START: true,
     SCAN_EVERY_MS: 700,
     REPLY_COOLDOWN_MS: 3000,
-    HUMAN_REPLY_DELAY_MIN_MS: 3500,
-    HUMAN_REPLY_DELAY_MAX_MS: 9000,
+    HUMAN_REPLY_DELAY_MIN_MS: 2000,
+    HUMAN_REPLY_DELAY_MAX_MS: 7000,
     THREAD_LOAD_SILENCE_MS: 1500, // ✅ REDUCIDO: 1.5 segundos al cargar un hilo (antes 3s)
     SEND_COOLDOWN_MS: 1100,
     DEFAULT_FALLBACK: "",
@@ -42,8 +42,8 @@
 
     // 🛡️ Anti-bloqueo de Messenger
     // Throttle GLOBAL por cuenta: tiempo mínimo entre CUALQUIER envío (mata las ráfagas)
-    GLOBAL_SEND_MIN_GAP_MS: 15000,
-    GLOBAL_SEND_MAX_GAP_MS: 30000,
+    GLOBAL_SEND_MIN_GAP_MS: 5000,
+    GLOBAL_SEND_MAX_GAP_MS: 20000,
     // Simulación de tecleo humano (el texto se escribe por trozos, no de golpe)
     TYPING_CHUNK_MIN: 2,
     TYPING_CHUNK_MAX: 5,
@@ -165,6 +165,8 @@ Reglas:
 - El número siempre como texto, nunca como enlace (no uses "https").
 - No repitas el saludo de bienvenida.
 - Responde siempre breve y en español.
+- si el cliente indica que no tiene para whatsapp puede llamar a este mismo numero 3046481994
+- si el cliente  insiste que le de informacion por este medio indiquele por comodida de nuestros clientes, ya que envamos cotizaciones, facturas detalle de envios
 
 Pasos:
 

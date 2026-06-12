@@ -664,6 +664,13 @@
       .vz2-code{background:#020617;border:1px solid rgba(148,163,184,.25);border-radius:8px;padding:10px 12px;margin-top:6px;color:#cbd5e1;font:500 11px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto;max-height:190px}
       .vz2-set-url{width:100%;box-sizing:border-box;background:#0f172a;color:#f1f5f9;border:1px solid rgba(148,163,184,.3);border-radius:9px;padding:9px 10px;font:500 12.5px system-ui;outline:none}
       .vz2-set-url:focus{border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.18)}
+      .vz2-switch{position:relative;display:inline-block;width:48px;height:27px;flex:0 0 auto}
+      .vz2-switch input{opacity:0;width:0;height:0;position:absolute;margin:0}
+      .vz2-slider{position:absolute;inset:0;background:#3f3f46;border:1px solid rgba(148,163,184,.3);border-radius:999px;cursor:pointer;transition:background .2s,border-color .2s}
+      .vz2-slider::before{content:"";position:absolute;height:19px;width:19px;left:3px;top:3px;background:#e2e8f0;border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.4)}
+      .vz2-switch input:checked + .vz2-slider{background:#059669;border-color:#10b981}
+      .vz2-switch input:checked + .vz2-slider::before{transform:translateX(21px)}
+      .vz2-switch input:focus-visible + .vz2-slider{box-shadow:0 0 0 3px rgba(56,189,248,.25)}
     `);
   }
 
@@ -798,8 +805,12 @@
     const aiHtml = `
       <div class="vz2-set-group">
         <div class="vz2-set-row" style="border-top:0">
-          <div class="vz2-set-ctrl"><input type="checkbox" data-ai-enabled ${current.aiEnabled?"checked":""}><span class="vz2-set-rlabel">Activar agente IA</span></div>
-          <div class="vz2-set-ctrl"><span class="vz2-set-rlabel">Modelo</span><input class="vz2-set-url" data-ai-model style="width:150px" value="${esc(current.openaiModel||"gpt-4o-mini")}"></div>
+          <div class="vz2-set-rlabel" style="font-size:14px;font-weight:700">Activar agente IA</div>
+          <div class="vz2-set-ctrl"><label class="vz2-switch"><input type="checkbox" data-ai-enabled ${current.aiEnabled?"checked":""}><span class="vz2-slider"></span></label></div>
+        </div>
+        <div class="vz2-set-row">
+          <div class="vz2-set-rlabel">Modelo</div>
+          <div class="vz2-set-ctrl"><input class="vz2-set-url" data-ai-model style="width:150px" value="${esc(current.openaiModel||"gpt-4o-mini")}"></div>
         </div>
         <div class="vz2-set-row">
           <div class="vz2-set-rlabel">Máx. respuestas por chat</div>
